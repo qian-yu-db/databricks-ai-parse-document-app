@@ -186,6 +186,21 @@ ai_parse_document_databricks_app/
 
 This project is part of Databricks' AI Functions demonstration and is intended for educational and demonstration purposes.
 
+## ⚠️ Known Limitations
+
+### Single File Processing
+- **One PDF at a time**: The application currently processes only **one PDF file at a time** (backend/app.py:284-286)
+- **Table overwrite**: Processing a new document will **completely overwrite** the Delta table, removing all previously processed data (backend/app.py:382-397)
+- **Workaround**: If you need to maintain multiple processed documents, consider:
+  - Using a different Delta table for each document
+  - Manually backing up the Delta table before processing new documents
+  - Modifying the backend to support append mode instead of overwrite mode
+
+### Future Enhancements
+- Multi-file batch processing support
+- Append mode for Delta table operations
+- Document version management and history tracking
+
 ## 🆘 Support
 
 For issues or questions:
