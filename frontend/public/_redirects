@@ -1,0 +1,4 @@
+# Static file redirects for Databricks Apps
+/next-steps /next-steps/index.html 200
+/document-intelligence /document-intelligence/index.html 200
+/* /index.html 404 

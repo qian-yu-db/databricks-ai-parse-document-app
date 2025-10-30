@@ -1,0 +1,17 @@
+RewriteEngine On
+
+# Handle directory access for static exports
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_URI} ^/next-steps/?$
+RewriteRule ^(.*)$ /next-steps/index.html [L]
+
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_URI} ^/document-intelligence/?$
+RewriteRule ^(.*)$ /document-intelligence/index.html [L]
+
+# Fallback to main index
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ /index.html [L] 
