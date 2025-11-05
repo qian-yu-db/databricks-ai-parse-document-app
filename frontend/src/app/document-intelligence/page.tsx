@@ -1266,6 +1266,49 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
         }, 5000); // Poll every 5 seconds
     };
 
+    const updateBatchJobId = async () => {
+        if (!newBatchJobId.trim()) {
+            alert('Please enter a job ID');
+            return;
+        }
+
+        setBatchJobUpdateLoading(true);
+        setBatchJobUpdateSuccess(false);
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/batch-job-config`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ job_id: newBatchJobId.trim() }),
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                // Update the batch job config with new data
+                setBatchJobConfig({
+                    ...batchJobConfig,
+                    job_id: data.job_id,
+                    job_name: data.job_name,
+                });
+                setBatchJobUpdateSuccess(true);
+                setNewBatchJobId('');
+
+                // Hide success message after 3 seconds
+                setTimeout(() => setBatchJobUpdateSuccess(false), 3000);
+            } else {
+                const errorData = await response.json();
+                alert(`Failed to update job ID: ${errorData.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Error updating batch job ID:', error);
+            alert('Failed to update batch job ID. Please try again.');
+        } finally {
+            setBatchJobUpdateLoading(false);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-50">
             {/* Mode Selector - Show if no mode selected */}
