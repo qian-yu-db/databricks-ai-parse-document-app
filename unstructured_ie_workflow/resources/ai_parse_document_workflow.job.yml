@@ -1,0 +1,58 @@
+resources:
+  jobs:
+    ai_parse_document_app_workflow:
+      name: ai_parse_document_app_workflow
+
+      environments:
+        - environment_key: serverless_env
+          spec:
+            client: "3"
+
+      tasks:
+        - task_key: clean_pipeline_tables
+          environment_key: serverless_env
+          notebook_task:
+            notebook_path: ../src/transformations/00-clean-pipeline-tables.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              output_volume_path: ${var.output_volume_path}
+              clean_pipeline_tables: ${var.clean_pipeline_tables}
+              checkpoint_base_path: ${var.checkpoint_base_path}
+              raw_table_name: ${var.raw_table_name}
+              content_table_name: ${var.content_table_name}
+              structured_table_name: ${var.structured_table_name}
+
+        - task_key: parse_documents
+          environment_key: serverless_env
+          depends_on:
+            - task_key: clean_pipeline_tables
+          notebook_task:
+            notebook_path: ../src/transformations/01_parse_documents.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              source_volume_path: ${var.source_volume_path}
+              output_volume_path: ${var.output_volume_path}
+              checkpoint_location: ${var.checkpoint_base_path}/01_parse_documents
+              table_name: ${var.raw_table_name}
+
+        - task_key: extract_content
+          depends_on:
+            - task_key: parse_documents
+          environment_key: serverless_env
+          notebook_task:
+            notebook_path: ../src/transformations/02_extract_document_content.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              checkpoint_location: ${var.checkpoint_base_path}/02_extract_document_content
+              source_table_name: ${var.raw_table_name}
+              table_name: ${var.content_table_name}
+
+      max_concurrent_runs: 1
+
+      # Optional: Add a schedule
+      # schedule:
+      #   quartz_cron_expression: "0 0 * * * ?"
+      #   timezone_id: "UTC"
