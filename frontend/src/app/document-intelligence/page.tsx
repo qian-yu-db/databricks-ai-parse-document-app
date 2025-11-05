@@ -50,6 +50,12 @@ export default function DocumentIntelligencePage() {
     const [batchJobPolling, setBatchJobPolling] = useState(false);
     const batchFileInputRef = useRef<HTMLInputElement>(null);
 
+    // Batch job configuration state
+    const [showBatchJobConfig, setShowBatchJobConfig] = useState(false);
+    const [newBatchJobId, setNewBatchJobId] = useState('');
+    const [batchJobUpdateLoading, setBatchJobUpdateLoading] = useState(false);
+    const [batchJobUpdateSuccess, setBatchJobUpdateSuccess] = useState(false);
+
     const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
     const [activeFileIndex, setActiveFileIndex] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
