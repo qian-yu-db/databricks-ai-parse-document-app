@@ -2355,7 +2355,16 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                             <CardContent className="space-y-6">
                                 {/* Job Configuration Status */}
                                 <div className="bg-gray-50 p-4 rounded-lg">
-                                    <h3 className="font-semibold mb-2">Job Configuration</h3>
+                                    <div className="flex items-center justify-between mb-2">
+                                        <h3 className="font-semibold">Job Configuration</h3>
+                                        <button
+                                            onClick={() => setShowBatchJobConfig(!showBatchJobConfig)}
+                                            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                        >
+                                            {showBatchJobConfig ? 'Hide Settings' : 'Update Job ID'}
+                                        </button>
+                                    </div>
+
                                     {batchJobConfigLoading ? (
                                         <p className="text-sm text-gray-600">Loading job configuration...</p>
                                     ) : batchJobConfig ? (
@@ -2367,6 +2376,47 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                         </div>
                                     ) : (
                                         <p className="text-sm text-red-600">⚠ Batch job is not configured or not deployed</p>
+                                    )}
+
+                                    {/* Job ID Update Section */}
+                                    {showBatchJobConfig && (
+                                        <div className="mt-4 pt-4 border-t border-gray-200">
+                                            <h4 className="text-sm font-medium text-gray-700 mb-2">Update Batch Job ID</h4>
+                                            <p className="text-xs text-gray-500 mb-3">
+                                                Enter the Databricks Job ID for batch processing. You can find this in your Databricks workspace under Workflows → Jobs.
+                                            </p>
+                                            <div className="flex items-center space-x-2">
+                                                <input
+                                                    type="text"
+                                                    value={newBatchJobId}
+                                                    onChange={(e) => setNewBatchJobId(e.target.value)}
+                                                    placeholder="Enter Job ID (e.g., 538604830129533)"
+                                                    className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                                />
+                                                <Button
+                                                    onClick={updateBatchJobId}
+                                                    disabled={batchJobUpdateLoading || !newBatchJobId.trim()}
+                                                    size="sm"
+                                                    className="flex items-center"
+                                                >
+                                                    {batchJobUpdateLoading ? (
+                                                        "Saving..."
+                                                    ) : (
+                                                        <>
+                                                            <Save className="w-4 h-4 mr-1" />
+                                                            Save
+                                                        </>
+                                                    )}
+                                                </Button>
+                                            </div>
+
+                                            {batchJobUpdateSuccess && (
+                                                <div className="flex items-center text-green-600 text-sm mt-2">
+                                                    <AlertCircle className="w-4 h-4 mr-2" />
+                                                    Job ID updated successfully! The new job will be used for batch processing.
+                                                </div>
+                                            )}
+                                        </div>
                                     )}
                                 </div>
 
