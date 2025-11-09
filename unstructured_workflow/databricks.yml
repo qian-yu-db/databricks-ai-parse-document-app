@@ -6,22 +6,22 @@ bundle:
 variables:
   catalog:
     description: The catalog name for the workflow
-    default: fins_genai
+    default: main
   schema:
     description: The schema name for the workflow
-    default: unstructured_documents
+    default: ai_parse_document_demo
   clean_pipeline_tables:
     description: Clean pipeline tables and checkpoints
     default: Yes
   source_volume_path:
     description: Source volume path for PDF files
-    default: /Volumes/fins_genai/unstructured_documents/ai_parse_document_app_workflow/inputs/
+    default: /Volumes/main/ai_parse_document_demo/ai_parse_document_app_workflow/
   output_volume_path:
     description: Output volume path for processed images
-    default: /Volumes/fins_genai/unstructured_documents/ai_parse_document_app_workflow/outputs/
+    default: /Volumes/main/ai_parse_document_demo/ai_parse_document_app_workflow/outputs/
   checkpoint_base_path:
     description: Base path for Structured Streaming checkpoints
-    default: /Volumes/fins_genai/unstructured_documents/checkpoints/ai_parse_document_app_workflow/
+    default: /Volumes/main/ai_parse_document_demo/checkpoints/ai_parse_document_app_workflow/
   raw_table_name:
     description: Table name for raw parsed documents
     default: parsed_documents_raw

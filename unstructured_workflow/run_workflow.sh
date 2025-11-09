@@ -10,7 +10,7 @@ PROFILE=""
 TARGET="dev"
 SKIP_VALIDATION=false
 SKIP_DEPLOYMENT=false
-SKIP_RUN=false
+SKIP_RUN=true  # Default to deploy-only mode (run job via UI)
 JOB_ID=""
 
 # Color codes for output
@@ -47,25 +47,32 @@ OPTIONS:
     --target TARGET         Deployment target (dev or prod, default: dev)
     --skip-validation       Skip bundle validation step
     --skip-deployment       Skip bundle deployment step
-    --skip-run              Deploy only, don't run the job
+    --run-now               Deploy AND run the job immediately (default: deploy only)
     --job-id JOB_ID         Job ID to run (skip deployment and use existing job)
     --help                  Show this help message
 
 EXAMPLES:
-    $0                                          # Validate, deploy, and run with dev target
+    $0                                          # Validate and deploy (deploy-only mode)
     $0 --profile my-profile --target prod       # Use specific profile and prod target
-    $0 --skip-run                               # Deploy only, don't run the job
+    $0 --run-now --profile my-profile           # Deploy and run the job immediately
     $0 --job-id 123456 --profile my-profile     # Run specific job ID directly
     $0 --skip-validation --profile my-profile   # Skip validation step
 
-WORKFLOW:
-    1. Bundle validation (optional)
-    2. Bundle deployment (optional)
-    3. Job execution (optional)
+WORKFLOW (Default):
+    1. Bundle validation
+    2. Bundle deployment
+    3. Display Job ID for use in Databricks App UI
+
+WORKFLOW (with --run-now):
+    1. Bundle validation
+    2. Bundle deployment
+    3. Run the job immediately
 
 NOTE:
-    - PDF uploads are handled by the Databricks App UI
-    - This script is for bundle deployment and job management only
+    - By default, the script only deploys the job (does not run it)
+    - Jobs are meant to be triggered via the Databricks App UI
+    - The script will display the Job ID to configure in the app
+    - Use --run-now if you want to run the job immediately after deployment
 
 EOF
 }
@@ -89,7 +96,12 @@ while [[ $# -gt 0 ]]; do
             SKIP_DEPLOYMENT=true
             shift
             ;;
+        --run-now)
+            SKIP_RUN=false
+            shift
+            ;;
         --skip-run)
+            # Deprecated: kept for backwards compatibility
             SKIP_RUN=true
             shift
             ;;
@@ -146,10 +158,27 @@ else
 fi
 
 # Step 2: Deploy bundle (unless skipped or using existing job)
+DEPLOYED_JOB_ID=""
 if [[ "$SKIP_DEPLOYMENT" == false && -z "$JOB_ID" ]]; then
     print_info "Deploying Databricks asset bundle to '$TARGET' target..."
+
     if databricks bundle deploy --target $TARGET $PROFILE_ARG; then
         print_success "Bundle deployed successfully to '$TARGET' target!"
+
+        # Retrieve the deployed job ID using bundle summary
+        if [[ -n "$WORKFLOW_NAME" ]]; then
+            print_info "Retrieving deployed job ID..."
+
+            # Extract job ID from bundle summary URL
+            DEPLOYED_JOB_ID=$(databricks bundle summary --target $TARGET $PROFILE_ARG 2>/dev/null | grep "URL:" | grep -oE '/jobs/[0-9]+' | grep -oE '[0-9]+' | head -1)
+
+            if [[ -n "$DEPLOYED_JOB_ID" ]]; then
+                print_success "✓ Found deployed job ID: $DEPLOYED_JOB_ID"
+            else
+                print_warning "Could not retrieve job ID automatically"
+                print_info "Find the Job ID in: Databricks workspace > Workflows > Search: \"$WORKFLOW_NAME\""
+            fi
+        fi
     else
         print_error "Bundle deployment failed!"
         exit 1
@@ -186,8 +215,51 @@ if [[ "$SKIP_RUN" == false ]]; then
         fi
     fi
 else
-    print_warning "Skipping job execution (--skip-run specified)"
-    print_info "Job has been deployed and is ready to be triggered via the Databricks App"
+    print_warning "Skipping job execution (deploy-only mode)"
+    print_info "Job has been deployed and is ready to be triggered via the Databricks App UI"
+    echo ""
+    print_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_success "📋 NEXT STEPS:"
+    print_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    if [[ -n "$DEPLOYED_JOB_ID" ]]; then
+        # Job ID was successfully retrieved
+        print_info "1. Copy the Job ID below:"
+        echo ""
+        print_success "   ┌─────────────────────────────────────────────────────┐"
+        print_success "   │  Job ID: ${DEPLOYED_JOB_ID}"
+        print_success "   │  Job Name: ${WORKFLOW_NAME}"
+        print_success "   └─────────────────────────────────────────────────────┘"
+        echo ""
+        print_info "2. Configure the Databricks App:"
+        print_info "   • Open the Databricks App UI in your browser"
+        print_info "   • Navigate to 'Batch Processing Mode'"
+        print_info "   • Click 'Update Job ID' button"
+        print_info "   • Paste the Job ID: ${DEPLOYED_JOB_ID}"
+        echo ""
+        print_info "3. Start processing!"
+        print_info "   • Upload your PDF files and click 'Upload and Start Batch Processing'"
+    else
+        # Job ID could not be retrieved (no recent runs)
+        print_info "1. Find the Job ID in your Databricks workspace:"
+        print_info "   • Open your Databricks workspace in a browser"
+        print_info "   • Navigate to 'Workflows' in the left sidebar"
+        print_info "   • Search for job name: \"$WORKFLOW_NAME\""
+        print_info "   • Copy the Job ID from the job details page"
+        echo ""
+        print_info "2. Configure the Databricks App:"
+        print_info "   • Open the Databricks App UI in your browser"
+        print_info "   • Navigate to 'Batch Processing Mode'"
+        print_info "   • Click 'Update Job ID' button"
+        print_info "   • Paste the Job ID you copied from step 1"
+        echo ""
+        print_info "3. Start processing!"
+        print_info "   • Upload your PDF files and click 'Upload and Start Batch Processing'"
+    fi
+
+    echo ""
+    print_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 fi
 
 print_success "🎉 All done!"

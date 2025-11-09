@@ -11,7 +11,7 @@ dbutils.widgets.text("catalog", "fins_genai", "Catalog name")
 dbutils.widgets.text("schema", "unstructured_documents", "Schema name")
 dbutils.widgets.text(
     "output_volume_path",
-    "/Volumes/fins_genai/unstructured_documents/ai_parse_document_workflow/outputs/",
+    "/Volumes/main/ai_parse_document_demo/ai_parse_document_app_workflow/outputs/",
     "Output volume path",
 )
 dbutils.widgets.dropdown(
@@ -60,6 +60,7 @@ def ensure_directories_exist():
     print("📁 Checking and creating required directories...")
 
     # Define all required directories
+    # Note: source_volume_path is NOT created here because users upload files there first
     required_dirs = [
         output_volume_path,
         f"/Volumes/{catalog}/{schema}/{checkpoint_base_path}",
@@ -119,27 +120,24 @@ def cleanup_pipeline():
         except Exception as e:
             print(f"  ❌ Failed to remove checkpoint {checkpoint_path}: {str(e)}")
 
-    # Clean any additional output directories (optional)
-    output_paths = [
-        f"{output_volume_path}",
-    ]
+    # Note: source_volume_path is NOT cleaned because users upload files there first
 
-    print("\n📁 Cleaning output directories...")
-    for output_path in output_paths:
-        try:
-            if os.path.exists(output_path):
-                # Only remove contents, not the directory itself
-                for item in os.listdir(output_path):
-                    item_path = os.path.join(output_path, item)
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                    else:
-                        os.remove(item_path)
-                print(f"  ✅ Cleaned output directory: {output_path}")
-            else:
-                print(f"  ℹ️  Output directory not found: {output_path}")
-        except Exception as e:
-            print(f"  ❌ Failed to clean output directory {output_path}: {str(e)}")
+    # Clean output directory contents
+    print("\n📁 Cleaning output directory...")
+    try:
+        if os.path.exists(output_volume_path):
+            # Only remove contents, not the directory itself
+            for item in os.listdir(output_volume_path):
+                item_path = os.path.join(output_volume_path, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.remove(item_path)
+            print(f"  ✅ Cleaned output directory: {output_volume_path}")
+        else:
+            print(f"  ℹ️  Output directory not found: {output_volume_path}")
+    except Exception as e:
+        print(f"  ❌ Failed to clean output directory {output_volume_path}: {str(e)}")
 
     print("\n🎉 Pipeline cleanup completed!")
 
@@ -161,7 +159,8 @@ else:
     print("  - parsed_documents_content")
     print("\n🗂️  Checkpoint directories that would be cleaned:")
     print(
-        "  - /Volumes/fins_genai/unstructured_documents/checkpoints/ai_parse_document_workflow/*"
+        f"  - {checkpoint_base_path}/*"
     )
     print("\n📁 Output directories that would be cleaned:")
-    print("  - ", output_volume_path)
+    print(f"  - {output_volume_path}/*")
+    print("\nℹ️  Note: Source directory is NOT cleaned to preserve uploaded files")

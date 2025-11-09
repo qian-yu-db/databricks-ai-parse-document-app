@@ -17,7 +17,6 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 import io
 import re
-from pathlib import Path
 
 def load_yaml_config():
     """Load configuration from app.yaml file"""
@@ -86,7 +85,8 @@ current_volume_path = os.getenv("DATABRICKS_VOLUME_PATH", YAML_CONFIG.get("DATAB
 current_delta_table_path = os.getenv("DATABRICKS_DELTA_TABLE_PATH", YAML_CONFIG.get("DATABRICKS_DELTA_TABLE_PATH"))
 
 # Batch job configuration
-batch_job_id = os.getenv("BATCH_JOB_ID", YAML_CONFIG.get("BATCH_JOB_ID"))
+batch_job_id = None  # Will be set when user configures it or looked up by job name
+batch_job_name = os.getenv("BATCH_JOB_NAME", YAML_CONFIG.get("BATCH_JOB_NAME"))
 batch_input_volume_path = os.getenv("BATCH_INPUT_VOLUME_PATH", YAML_CONFIG.get("BATCH_INPUT_VOLUME_PATH"))
 
 class WarehouseConfigRequest(BaseModel):
@@ -176,7 +176,11 @@ def update_delta_table_path_config(request: DeltaTablePathConfigRequest):
 
 @app.get("/api/batch-job-config")
 def get_batch_job_config():
-    """Get batch job configuration and verify job exists"""
+    """Get batch job configuration - tries to find job by configured job_id or by job name"""
+    global batch_job_id
+
+    print(f"🔵 DEBUG: get_batch_job_config called - batch_job_id={batch_job_id}, batch_job_name={batch_job_name}")
+
     if not w:
         return {
             "success": False,
@@ -184,34 +188,116 @@ def get_batch_job_config():
             "error": "Databricks connection not configured"
         }
 
-    if not batch_job_id:
+    try:
+        job = None
+        job_id_to_use = batch_job_id
+
+        # If we have a batch_job_id, try to get the job directly
+        if batch_job_id:
+            try:
+                job = w.jobs.get(job_id=int(batch_job_id))
+            except Exception as e:
+                print(f"⚠️ Job ID {batch_job_id} not found: {e}")
+                batch_job_id = None  # Reset if invalid
+
+        # If no job_id or it was invalid, try to find by name
+        if not job and batch_job_name:
+            print(f"🔍 Searching for job with name containing: {batch_job_name}")
+            jobs_list = list(w.jobs.list(name=batch_job_name))
+
+            if jobs_list:
+                # Find exact match or match with [dev username] prefix
+                for j in jobs_list:
+                    if j.settings and j.settings.name:
+                        # Match exact name or name with dev prefix like "[dev q_yu] ai_parse_document_app_workflow"
+                        if (j.settings.name == batch_job_name or
+                            j.settings.name.endswith(batch_job_name)):
+                            job = j
+                            job_id_to_use = str(j.job_id)
+                            batch_job_id = job_id_to_use  # Cache for future requests
+                            print(f"✅ Found job: {j.settings.name} (ID: {j.job_id})")
+                            break
+
+        if job:
+            response = {
+                "success": True,
+                "job_deployed": True,
+                "job_id": job_id_to_use,
+                "job_name": job.settings.name if job.settings else None,
+                "input_volume_path": batch_input_volume_path,
+                "message": f"Batch job '{job.settings.name}' is ready"
+            }
+            print(f"🔵 DEBUG: Returning job found response: {response}")
+            return response
+        else:
+            # No job found
+            if not batch_job_name:
+                message = "No batch job configured. Please deploy the asset bundle and configure the job ID."
+            else:
+                message = f"Job '{batch_job_name}' not found. Please deploy the asset bundle first."
+
+            return {
+                "success": False,
+                "job_deployed": False,
+                "job_name": batch_job_name,
+                "input_volume_path": batch_input_volume_path,
+                "message": message
+            }
+    except Exception as e:
+        print(f"❌ Error in get_batch_job_config: {str(e)}")
         return {
             "success": False,
             "job_deployed": False,
-            "error": "BATCH_JOB_ID not configured in app.yaml",
-            "message": "Please deploy the asset bundle and configure BATCH_JOB_ID"
+            "job_name": batch_job_name,
+            "error": str(e),
+            "message": "Error checking job configuration"
         }
+
+
+@app.post("/api/clean-batch-input-path")
+async def clean_batch_input_path():
+    """Clean all files from batch input volume path before new upload"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    if not batch_input_volume_path:
+        raise HTTPException(status_code=500, detail="BATCH_INPUT_VOLUME_PATH not configured")
 
     try:
-        # Check if job exists
-        job = w.jobs.get(job_id=int(batch_job_id))
+        base_path = batch_input_volume_path.rstrip('/')
 
-        return {
-            "success": True,
-            "job_deployed": True,
-            "job_id": batch_job_id,
-            "job_name": job.settings.name if job.settings else None,
-            "input_volume_path": batch_input_volume_path,
-            "message": f"Batch job '{job.settings.name}' is ready"
-        }
+        # Check if directory exists
+        try:
+            files_in_dir = w.files.list_directory_contents(base_path)
+
+            # Delete all files in the directory
+            deleted_count = 0
+            for file_info in files_in_dir:
+                try:
+                    w.files.delete(file_info.path)
+                    deleted_count += 1
+                    print(f"🗑️  Deleted: {file_info.path}")
+                except Exception as e:
+                    print(f"⚠️  Failed to delete {file_info.path}: {str(e)}")
+
+            return {
+                "success": True,
+                "message": f"Cleaned batch input path: {base_path}",
+                "deleted_count": deleted_count
+            }
+        except Exception as e:
+            # Directory doesn't exist or is already empty
+            if "does not exist" in str(e).lower() or "not found" in str(e).lower():
+                return {
+                    "success": True,
+                    "message": f"Batch input path is empty or doesn't exist: {base_path}",
+                    "deleted_count": 0
+                }
+            raise
+
     except Exception as e:
-        return {
-            "success": False,
-            "job_deployed": False,
-            "job_id": batch_job_id,
-            "error": str(e),
-            "message": "Job not found. Please deploy the asset bundle first."
-        }
+        print(f"❌ Error cleaning batch input path: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to clean batch input path: {str(e)}")
 
 
 @app.post("/api/upload-batch-pdfs")
@@ -332,6 +418,33 @@ def get_batch_job_status(run_id: int):
         is_success = result_state == "SUCCESS"
         is_failed = result_state in ["FAILED", "TIMEDOUT", "CANCELED"]
 
+        # Extract output table info from job parameters
+        output_tables = []
+        if run.tasks and len(run.tasks) > 0:
+            # Get the job settings to access parameters
+            job_id = run.job_id
+            if job_id:
+                try:
+                    job = w.jobs.get(job_id=job_id)
+                    if job.settings and job.settings.parameters:
+                        params = job.settings.parameters
+                        # Extract catalog, schema, and table names from parameters
+                        catalog = params.get('catalog', '')
+                        schema = params.get('schema', '')
+                        raw_table = params.get('raw_table_name', '')
+                        content_table = params.get('content_table_name', '')
+                        structured_table = params.get('structured_table_name', '')
+
+                        if catalog and schema:
+                            if raw_table:
+                                output_tables.append(f"{catalog}.{schema}.{raw_table}")
+                            if content_table:
+                                output_tables.append(f"{catalog}.{schema}.{content_table}")
+                            if structured_table:
+                                output_tables.append(f"{catalog}.{schema}.{structured_table}")
+                except Exception as e:
+                    print(f"⚠️ Could not fetch job parameters: {e}")
+
         return {
             "success": True,
             "run_id": run_id,
@@ -343,7 +456,8 @@ def get_batch_job_status(run_id: int):
             "start_time": run.start_time,
             "end_time": run.end_time,
             "tasks": tasks,
-            "run_page_url": run.run_page_url
+            "run_page_url": run.run_page_url,
+            "output_tables": output_tables
         }
 
     except Exception as e:
@@ -364,37 +478,16 @@ def update_batch_job_config(request: dict):
         raise HTTPException(status_code=400, detail="job_id is required")
 
     try:
-        # Verify job exists
+        # Verify job exists and is accessible
         job = w.jobs.get(job_id=int(new_job_id))
 
-        # Update the global variable
+        # Update the global variable (persists for app lifetime)
         batch_job_id = str(new_job_id)
 
         # Update YAML config in memory
         YAML_CONFIG["BATCH_JOB_ID"] = str(new_job_id)
 
-        # Write updated config back to app.yaml
-        yaml_path = Path(__file__).parent / "app.yaml"
-        with open(yaml_path, 'r') as f:
-            yaml_content = yaml.safe_load(f)
-
-        # Update the BATCH_JOB_ID in env section
-        if 'env' in yaml_content:
-            for env_var in yaml_content['env']:
-                if env_var.get('name') == 'BATCH_JOB_ID':
-                    env_var['value'] = str(new_job_id)
-                    break
-            else:
-                # Add if not exists
-                yaml_content['env'].append({
-                    'name': 'BATCH_JOB_ID',
-                    'value': str(new_job_id)
-                })
-
-        with open(yaml_path, 'w') as f:
-            yaml.dump(yaml_content, f, default_flow_style=False)
-
-        print(f"✅ Updated BATCH_JOB_ID to {new_job_id}")
+        print(f"✅ Updated BATCH_JOB_ID to {new_job_id} (in-memory)")
 
         return {
             "success": True,
@@ -403,6 +496,7 @@ def update_batch_job_config(request: dict):
             "message": f"Batch job ID updated to {new_job_id}"
         }
     except Exception as e:
+        print(f"❌ Failed to update batch job config: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update batch job config: {str(e)}")
 
 
@@ -448,11 +542,28 @@ async def upload_to_uc(files: List[UploadFile] = FastAPIFile(...)):
     
     try:
         uploaded_files = []
-        
-        # Create "images" directory in UC Volume if it doesn't exist
+
         base_path = get_uc_volume_path().rstrip('/')  # Remove trailing slash
+
+        # Check if base volume path exists, create if it doesn't
+        try:
+            w.files.get_status(path=base_path)
+            print(f"✅ Base volume path exists: {base_path}")
+        except Exception:
+            # Base path doesn't exist, try to create it
+            try:
+                w.files.create_directory(directory_path=base_path)
+                print(f"✅ Created base volume path: {base_path}")
+            except Exception as create_error:
+                # Check if error is because directory already exists
+                if "already exists" in str(create_error).lower() or "file_already_exists" in str(create_error).lower():
+                    print(f"📁 Base volume path already exists: {base_path}")
+                else:
+                    print(f"⚠️ Warning: Could not create base volume path: {create_error}")
+
+        # Create "images" directory in UC Volume if it doesn't exist
         images_dir_path = f"{base_path}/images"
-        
+
         try:
             # Try to create the images directory
             w.files.create_directory(directory_path=images_dir_path)

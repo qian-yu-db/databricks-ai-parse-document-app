@@ -4,9 +4,33 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useState, useRef, useEffect } from 'react';
 import Link from "next/link";
-import { ArrowLeft, Upload, FileText, Database, Settings, AlertCircle, File, Eye, Play, Loader2, Lightbulb, Save, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, Upload, FileText, Database, Settings, AlertCircle, File, Eye, Play, Loader2, Lightbulb, Save, ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { apiCall } from "@/lib/api-config";
 import { FloatingTooltip } from "@/components/ui/floating-tooltip";
+
+// Helper function to format state names for better UX
+const formatStateName = (state: string): string => {
+    const stateMap: Record<string, string> = {
+        'BLOCKED': 'PENDING',
+        'TERMINATED': 'COMPLETED',
+        'SUCCESS': 'SUCCESS',
+        'FAILED': 'FAILED',
+        'RUNNING': 'RUNNING',
+        'PENDING': 'PENDING',
+        'TERMINATING': 'FINISHING',
+        'CANCELED': 'CANCELED'
+    };
+    return stateMap[state] || state;
+};
+
+// Helper function to calculate duration in seconds
+const calculateDuration = (startTime: number | null, endTime: number | null): string => {
+    if (!startTime) return '';
+    if (!endTime) return '...';
+    const durationMs = endTime - startTime;
+    const durationSec = Math.round(durationMs / 1000);
+    return `${durationSec}s`;
+};
 
 interface SelectedFile {
     file: File;
@@ -1171,26 +1195,27 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
 
     // ========== Batch Mode Functions ==========
 
+    // Function to check batch job configuration
+    const checkBatchConfig = async () => {
+        setBatchJobConfigLoading(true);
+        try {
+            // Add timestamp to prevent caching
+            const timestamp = new Date().getTime();
+            const data = await apiCall(`/api/batch-job-config?t=${timestamp}`, {
+                method: 'GET',
+                cache: 'no-store',
+            });
+            setBatchJobConfig(data);
+        } catch (error) {
+            console.error('Error loading batch job config:', error);
+            setBatchJobConfig(null);
+        } finally {
+            setBatchJobConfigLoading(false);
+        }
+    };
+
     // Check batch job configuration on mount
     useEffect(() => {
-        const checkBatchConfig = async () => {
-            setBatchJobConfigLoading(true);
-            try {
-                const response = await fetch(`${API_BASE_URL}/api/batch-job-config`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setBatchJobConfig(data);
-                } else {
-                    console.error('Failed to load batch job config');
-                    setBatchJobConfig(null);
-                }
-            } catch (error) {
-                console.error('Error loading batch job config:', error);
-                setBatchJobConfig(null);
-            } finally {
-                setBatchJobConfigLoading(false);
-            }
-        };
         checkBatchConfig();
     }, []);
 
@@ -1207,33 +1232,32 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
         setBatchUploadProgress({ uploading: true, total: batchFiles.length, uploaded: 0 });
 
         try {
-            // Upload files
+            // Step 1: Clean the batch input path before uploading
+            console.log('Cleaning batch input path...');
+            const cleanResult = await apiCall("/api/clean-batch-input-path", {
+                method: 'POST',
+            });
+            console.log(`Cleaned ${cleanResult.deleted_count} existing files from batch input path`);
+
+            // Step 2: Upload files
             const formData = new FormData();
             batchFiles.forEach((file) => {
                 formData.append('files', file);
             });
 
-            const uploadResponse = await fetch(`${API_BASE_URL}/api/upload-batch-pdfs`, {
+            await apiCall("/api/upload-batch-pdfs", {
                 method: 'POST',
                 body: formData,
             });
 
-            if (!uploadResponse.ok) {
-                throw new Error('Failed to upload files');
-            }
-
             setBatchUploadProgress({ uploading: false, total: batchFiles.length, uploaded: batchFiles.length });
 
             // Trigger job
-            const triggerResponse = await fetch(`${API_BASE_URL}/api/trigger-batch-job`, {
+            const triggerResult = await apiCall("/api/trigger-batch-job", {
                 method: 'POST',
             });
 
-            if (!triggerResponse.ok) {
-                throw new Error('Failed to trigger batch job');
-            }
-
-            const { run_id } = await triggerResponse.json();
+            const { run_id } = triggerResult;
             setBatchJobRunId(run_id);
             setBatchJobPolling(true);
 
@@ -1241,7 +1265,8 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
             pollBatchJobStatus(run_id);
         } catch (error) {
             console.error('Error in batch processing:', error);
-            alert('Failed to process batch job. Please try again.');
+            const errorMsg = getErrorMessage(error);
+            alert(`Failed to process batch job: ${errorMsg}`);
             setBatchUploadProgress({ uploading: false, total: 0, uploaded: 0 });
         }
     };
@@ -1249,16 +1274,15 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
     const pollBatchJobStatus = async (runId: number) => {
         const pollInterval = setInterval(async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/api/batch-job-status/${runId}`);
-                if (response.ok) {
-                    const status = await response.json();
-                    setBatchJobStatus(status);
+                const status = await apiCall(`/api/batch-job-status/${runId}`, {
+                    method: 'GET',
+                });
+                setBatchJobStatus(status);
 
-                    // Stop polling if terminal state
-                    if (['SUCCESS', 'FAILED', 'CANCELED', 'TERMINATED'].includes(status.state?.life_cycle_state)) {
-                        clearInterval(pollInterval);
-                        setBatchJobPolling(false);
-                    }
+                // Stop polling if terminal state (use flat structure)
+                if (['SUCCESS', 'FAILED', 'CANCELED', 'TERMINATED'].includes(status.state)) {
+                    clearInterval(pollInterval);
+                    setBatchJobPolling(false);
                 }
             } catch (error) {
                 console.error('Error polling job status:', error);
@@ -1276,7 +1300,7 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
         setBatchJobUpdateSuccess(false);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/batch-job-config`, {
+            const data = await apiCall("/api/batch-job-config", {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1284,26 +1308,21 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                 body: JSON.stringify({ job_id: newBatchJobId.trim() }),
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                // Update the batch job config with new data
-                setBatchJobConfig({
-                    ...batchJobConfig,
-                    job_id: data.job_id,
-                    job_name: data.job_name,
-                });
-                setBatchJobUpdateSuccess(true);
-                setNewBatchJobId('');
+            // Update the batch job config with new data
+            setBatchJobConfig({
+                ...batchJobConfig,
+                job_id: data.job_id,
+                job_name: data.job_name,
+            });
+            setBatchJobUpdateSuccess(true);
+            setNewBatchJobId('');
 
-                // Hide success message after 3 seconds
-                setTimeout(() => setBatchJobUpdateSuccess(false), 3000);
-            } else {
-                const errorData = await response.json();
-                alert(`Failed to update job ID: ${errorData.detail || 'Unknown error'}`);
-            }
+            // Hide success message after 3 seconds
+            setTimeout(() => setBatchJobUpdateSuccess(false), 3000);
         } catch (error) {
             console.error('Error updating batch job ID:', error);
-            alert('Failed to update batch job ID. Please try again.');
+            const errorMsg = getErrorMessage(error);
+            alert(`Failed to update job ID: ${errorMsg}`);
         } finally {
             setBatchJobUpdateLoading(false);
         }
@@ -1331,13 +1350,13 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                     </div>
                                     <h2 className="text-2xl font-bold text-gray-800 mb-3">Interactive Mode</h2>
                                     <p className="text-gray-600 mb-4">
-                                        Process and visualize a single PDF document with real-time results and interactive bounding box visualization
+                                        Process and visualize a single PDF document with interactive bounding box visualization
                                     </p>
                                     <ul className="text-sm text-gray-500 space-y-2 text-left">
                                         <li>✓ Upload one PDF at a time</li>
-                                        <li>✓ Real-time AI parsing</li>
                                         <li>✓ Interactive page visualization</li>
                                         <li>✓ Immediate results</li>
+                                        <li>✓ Ideal for debugging complex document parsing</li>
                                     </ul>
                                 </div>
                             </div>
@@ -1353,11 +1372,11 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                     </div>
                                     <h2 className="text-2xl font-bold text-gray-800 mb-3">Batch Mode</h2>
                                     <p className="text-gray-600 mb-4">
-                                        Process multiple PDF documents asynchronously using Databricks Jobs for high-volume workflows
+                                        Process multiple PDF documents using Databricks Jobs for high-volume workflows
                                     </p>
                                     <ul className="text-sm text-gray-500 space-y-2 text-left">
                                         <li>✓ Upload multiple PDFs</li>
-                                        <li>✓ Asynchronous processing</li>
+                                        <li>✓ Structured streaming processing</li>
                                         <li>✓ Scalable job execution</li>
                                         <li>✓ Batch results in Delta tables</li>
                                     </ul>
@@ -1490,10 +1509,13 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
             {/* Header */}
             <header className="bg-white shadow-sm border-b border-gray-200">
                 <div className="flex items-center justify-between px-8 py-4">
-                    <Link href="/" className="flex items-center text-blue-600 hover:text-blue-800 font-medium">
+                    <button
+                        onClick={() => setProcessingMode(null)}
+                        className="flex items-center text-blue-600 hover:text-blue-800 font-medium"
+                    >
                         <ArrowLeft className="w-4 h-4 mr-2" />
-                        back to main menu
-                    </Link>
+                        back to mode selection
+                    </button>
                     <div className="flex items-center space-x-4">
                         <button 
                             onClick={() => setShowWarehouseConfig(!showWarehouseConfig)}
@@ -2357,17 +2379,28 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                 <div className="bg-gray-50 p-4 rounded-lg">
                                     <div className="flex items-center justify-between mb-2">
                                         <h3 className="font-semibold">Job Configuration</h3>
-                                        <button
-                                            onClick={() => setShowBatchJobConfig(!showBatchJobConfig)}
-                                            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
-                                        >
-                                            {showBatchJobConfig ? 'Hide Settings' : 'Update Job ID'}
-                                        </button>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={checkBatchConfig}
+                                                disabled={batchJobConfigLoading}
+                                                className="text-xs text-gray-600 hover:text-gray-800 font-medium flex items-center gap-1"
+                                                title="Refresh configuration from backend"
+                                            >
+                                                <RefreshCw className={`w-3 h-3 ${batchJobConfigLoading ? 'animate-spin' : ''}`} />
+                                                Refresh
+                                            </button>
+                                            <button
+                                                onClick={() => setShowBatchJobConfig(!showBatchJobConfig)}
+                                                className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                            >
+                                                {showBatchJobConfig ? 'Hide Settings' : 'Update Job ID'}
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {batchJobConfigLoading ? (
                                         <p className="text-sm text-gray-600">Loading job configuration...</p>
-                                    ) : batchJobConfig ? (
+                                    ) : batchJobConfig?.job_deployed ? (
                                         <div className="text-sm space-y-1">
                                             <p className="text-green-600 font-medium">✓ Batch job is configured and deployed</p>
                                             <p className="text-gray-600">Job ID: {batchJobConfig.job_id}</p>
@@ -2375,7 +2408,23 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                             <p className="text-gray-600">Input Volume: {batchJobConfig.input_volume_path}</p>
                                         </div>
                                     ) : (
-                                        <p className="text-sm text-red-600">⚠ Batch job is not configured or not deployed</p>
+                                        <div className="text-sm space-y-2">
+                                            <p className="text-red-600">⚠ Batch job is not configured or not deployed</p>
+                                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-gray-700">
+                                                <p className="font-semibold text-blue-900 mb-2">To deploy the Asset Bundle:</p>
+                                                <p className="text-gray-600 mb-2 italic">Note: The asset bundle is included in the project repository. Ensure you have cloned the repo before proceeding.</p>
+                                                <ol className="list-decimal list-inside space-y-1 ml-2">
+                                                    <li>Navigate to the <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">unstructured_workflow</code> directory</li>
+                                                    <li>Run: <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">databricks bundle validate --profile YOUR_PROFILE</code></li>
+                                                    <li>Deploy: <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">databricks bundle deploy --profile YOUR_PROFILE</code></li>
+                                                    <li>The app will automatically detect the deployed job by name</li>
+                                                    <li>If needed, you can manually enter the Job ID using "Update Job ID" button above</li>
+                                                </ol>
+                                                <p className="mt-2 text-blue-800">
+                                                    See <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">unstructured_workflow/CLAUDE.md</code> for detailed instructions.
+                                                </p>
+                                            </div>
+                                        </div>
                                     )}
 
                                     {/* Job ID Update Section */}
@@ -2451,9 +2500,14 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                         {/* Upload Progress */}
                                         {batchUploadProgress.uploading && (
                                             <div className="bg-blue-50 p-4 rounded-lg">
-                                                <p className="text-sm text-blue-700">
+                                                <p className="text-sm font-medium text-blue-700 mb-1">
                                                     Uploading files... {batchUploadProgress.uploaded} / {batchUploadProgress.total}
                                                 </p>
+                                                {batchJobConfig?.input_volume_path && (
+                                                    <p className="text-xs text-blue-600 font-mono">
+                                                        Uploading to: {batchJobConfig.input_volume_path}
+                                                    </p>
+                                                )}
                                             </div>
                                         )}
 
@@ -2473,11 +2527,11 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                                 <div className="text-sm space-y-1">
                                                     <p>Run ID: {batchJobRunId}</p>
                                                     <p>State: <span className={`font-medium ${
-                                                        batchJobStatus.state?.life_cycle_state === 'SUCCESS' ? 'text-green-600' :
-                                                        batchJobStatus.state?.life_cycle_state === 'FAILED' ? 'text-red-600' :
+                                                        batchJobStatus.state === 'SUCCESS' ? 'text-green-600' :
+                                                        batchJobStatus.state === 'FAILED' ? 'text-red-600' :
                                                         'text-blue-600'
-                                                    }`}>{batchJobStatus.state?.life_cycle_state || 'N/A'}</span></p>
-                                                    <p>Result State: {batchJobStatus.state?.result_state || 'N/A'}</p>
+                                                    }`}>{batchJobStatus.state || 'N/A'}</span></p>
+                                                    <p>Result State: {batchJobStatus.result_state || 'N/A'}</p>
                                                     {batchJobStatus.run_page_url && (
                                                         <a
                                                             href={batchJobStatus.run_page_url}
@@ -2492,13 +2546,45 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                                         <div className="mt-3">
                                                             <p className="font-medium mb-1">Tasks:</p>
                                                             <ul className="space-y-1 ml-4">
-                                                                {batchJobStatus.tasks.map((task: any, idx: number) => (
-                                                                    <li key={idx}>
-                                                                        {task.task_key}: <span className={`font-medium ${
-                                                                            task.state?.life_cycle_state === 'SUCCESS' ? 'text-green-600' :
-                                                                            task.state?.life_cycle_state === 'FAILED' ? 'text-red-600' :
-                                                                            'text-blue-600'
-                                                                        }`}>{task.state?.life_cycle_state || 'N/A'}</span>
+                                                                {(() => {
+                                                                    // Sort tasks in workflow execution order
+                                                                    const taskOrder = ['clean_pipeline_tables', 'parse_documents', 'extract_content'];
+                                                                    const sortedTasks = [...batchJobStatus.tasks].sort((a, b) => {
+                                                                        const indexA = taskOrder.indexOf(a.task_key);
+                                                                        const indexB = taskOrder.indexOf(b.task_key);
+                                                                        // If task not in order array, put it at the end
+                                                                        const orderA = indexA === -1 ? 999 : indexA;
+                                                                        const orderB = indexB === -1 ? 999 : indexB;
+                                                                        return orderA - orderB;
+                                                                    });
+
+                                                                    return sortedTasks.map((task: any, idx: number) => {
+                                                                        const formattedState = formatStateName(task.state || 'N/A');
+                                                                        const duration = calculateDuration(task.start_time, task.end_time);
+                                                                        return (
+                                                                            <li key={idx} className="text-sm">
+                                                                                {task.task_key}: <span className={`font-medium ${
+                                                                                    task.state === 'SUCCESS' || task.state === 'TERMINATED' ? 'text-green-600' :
+                                                                                    task.state === 'FAILED' ? 'text-red-600' :
+                                                                                    'text-blue-600'
+                                                                                }`}>{formattedState}</span>
+                                                                                {duration && <span className="text-gray-500 ml-2">({duration})</span>}
+                                                                            </li>
+                                                                        );
+                                                                    });
+                                                                })()}
+                                                            </ul>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Output Tables Display */}
+                                                    {batchJobStatus.output_tables && batchJobStatus.output_tables.length > 0 && (
+                                                        <div className="mt-3">
+                                                            <p className="font-medium mb-1">Output Tables:</p>
+                                                            <ul className="space-y-1 ml-4">
+                                                                {batchJobStatus.output_tables.map((table: string, idx: number) => (
+                                                                    <li key={idx} className="text-sm font-mono text-blue-600">
+                                                                        {table}
                                                                     </li>
                                                                 ))}
                                                             </ul>
