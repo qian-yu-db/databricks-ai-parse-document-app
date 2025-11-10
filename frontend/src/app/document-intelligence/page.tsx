@@ -1308,11 +1308,14 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                 body: JSON.stringify({ job_id: newBatchJobId.trim() }),
             });
 
-            // Update the batch job config with new data
+            // Update the batch job config with complete data from response
             setBatchJobConfig({
                 ...batchJobConfig,
+                success: data.success,
+                job_deployed: data.job_deployed,
                 job_id: data.job_id,
                 job_name: data.job_name,
+                input_volume_path: data.input_volume_path,
             });
             setBatchJobUpdateSuccess(true);
             setNewBatchJobId('');
@@ -2579,11 +2582,12 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
 
                                                     {/* Output Tables Display */}
                                                     {batchJobStatus.output_tables && batchJobStatus.output_tables.length > 0 && (
-                                                        <div className="mt-3">
-                                                            <p className="font-medium mb-1">Output Tables:</p>
-                                                            <ul className="space-y-1 ml-4">
+                                                        <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                                                            <p className="font-medium mb-1 text-blue-900">📊 Output Tables</p>
+                                                            <p className="text-xs text-blue-700 mb-2">Extracted document content is stored in:</p>
+                                                            <ul className="space-y-1 ml-2">
                                                                 {batchJobStatus.output_tables.map((table: string, idx: number) => (
-                                                                    <li key={idx} className="text-sm font-mono text-blue-600">
+                                                                    <li key={idx} className="text-sm font-mono text-blue-800 bg-white px-2 py-1 rounded border border-blue-200">
                                                                         {table}
                                                                     </li>
                                                                 ))}

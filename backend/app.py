@@ -418,30 +418,55 @@ def get_batch_job_status(run_id: int):
         is_success = result_state == "SUCCESS"
         is_failed = result_state in ["FAILED", "TIMEDOUT", "CANCELED"]
 
-        # Extract output table info from job parameters
+        # Extract output table info from task parameters
         output_tables = []
+        catalog = None
+        schema = None
+        raw_table = None
+        content_table = None
+
+        # Try to extract parameters from the first task (clean_pipeline_tables has all params)
         if run.tasks and len(run.tasks) > 0:
-            # Get the job settings to access parameters
             job_id = run.job_id
             if job_id:
                 try:
                     job = w.jobs.get(job_id=job_id)
+
+                    # First, try job-level parameters (for backward compatibility)
                     if job.settings and job.settings.parameters:
                         params = job.settings.parameters
-                        # Extract catalog, schema, and table names from parameters
                         catalog = params.get('catalog', '')
                         schema = params.get('schema', '')
                         raw_table = params.get('raw_table_name', '')
                         content_table = params.get('content_table_name', '')
-                        structured_table = params.get('structured_table_name', '')
 
-                        if catalog and schema:
-                            if raw_table:
-                                output_tables.append(f"{catalog}.{schema}.{raw_table}")
-                            if content_table:
-                                output_tables.append(f"{catalog}.{schema}.{content_table}")
-                            if structured_table:
-                                output_tables.append(f"{catalog}.{schema}.{structured_table}")
+                    # If not found, extract from task-level base_parameters
+                    if not catalog and job.settings and job.settings.tasks:
+                        for task_def in job.settings.tasks:
+                            # Look for the clean_pipeline_tables or parse_documents task which has all params
+                            if task_def.task_key in ['clean_pipeline_tables', 'parse_documents', 'extract_content']:
+                                if task_def.notebook_task and task_def.notebook_task.base_parameters:
+                                    params = task_def.notebook_task.base_parameters
+                                    if not catalog:
+                                        catalog = params.get('catalog', '')
+                                    if not schema:
+                                        schema = params.get('schema', '')
+                                    if not raw_table:
+                                        raw_table = params.get('raw_table_name') or params.get('table_name', '')
+                                    if not content_table:
+                                        content_table = params.get('content_table_name', '')
+
+                                    # If we found catalog and schema, we can build the table paths
+                                    if catalog and schema:
+                                        break
+
+                    # Build output table list
+                    if catalog and schema:
+                        if raw_table:
+                            output_tables.append(f"{catalog}.{schema}.{raw_table}")
+                        if content_table:
+                            output_tables.append(f"{catalog}.{schema}.{content_table}")
+
                 except Exception as e:
                     print(f"⚠️ Could not fetch job parameters: {e}")
 
@@ -491,8 +516,10 @@ def update_batch_job_config(request: dict):
 
         return {
             "success": True,
+            "job_deployed": True,
             "job_id": str(new_job_id),
             "job_name": job.settings.name if job.settings else None,
+            "input_volume_path": batch_input_volume_path,
             "message": f"Batch job ID updated to {new_job_id}"
         }
     except Exception as e:
