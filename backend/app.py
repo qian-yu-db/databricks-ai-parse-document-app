@@ -53,6 +53,7 @@ app.add_middleware(
 class WriteToTableRequest(BaseModel):
     file_paths: List[str]
     limit: int = 10
+    operation_mode: str = 'append'  # 'replace' or 'append'
 
 class QueryDeltaTableRequest(BaseModel):
     file_paths: List[str] = []
@@ -82,6 +83,11 @@ except Exception as e:
 current_warehouse_id = warehouse_id
 current_volume_path = os.getenv("DATABRICKS_VOLUME_PATH", YAML_CONFIG.get("DATABRICKS_VOLUME_PATH"))
 current_delta_table_path = os.getenv("DATABRICKS_DELTA_TABLE_PATH", YAML_CONFIG.get("DATABRICKS_DELTA_TABLE_PATH"))
+
+# Batch job configuration
+batch_job_id = None  # Will be set when user configures it or looked up by job name
+batch_job_name = os.getenv("BATCH_JOB_NAME", YAML_CONFIG.get("BATCH_JOB_NAME"))
+batch_input_volume_path = os.getenv("BATCH_INPUT_VOLUME_PATH", YAML_CONFIG.get("BATCH_INPUT_VOLUME_PATH"))
 
 class WarehouseConfigRequest(BaseModel):
     warehouse_id: str
@@ -164,6 +170,397 @@ def update_delta_table_path_config(request: DeltaTablePathConfigRequest):
     }
 
 
+# ============================================================================
+# BATCH JOB APIs
+# ============================================================================
+
+@app.get("/api/batch-job-config")
+def get_batch_job_config():
+    """Get batch job configuration - tries to find job by configured job_id or by job name"""
+    global batch_job_id
+
+    print(f"🔵 DEBUG: get_batch_job_config called - batch_job_id={batch_job_id}, batch_job_name={batch_job_name}")
+
+    if not w:
+        return {
+            "success": False,
+            "job_deployed": False,
+            "error": "Databricks connection not configured"
+        }
+
+    try:
+        job = None
+        job_id_to_use = batch_job_id
+
+        # If we have a batch_job_id, try to get the job directly
+        if batch_job_id:
+            try:
+                job = w.jobs.get(job_id=int(batch_job_id))
+            except Exception as e:
+                print(f"⚠️ Job ID {batch_job_id} not found: {e}")
+                batch_job_id = None  # Reset if invalid
+
+        # If no job_id or it was invalid, try to find by name
+        if not job and batch_job_name:
+            print(f"🔍 Searching for job with name containing: {batch_job_name}")
+            jobs_list = list(w.jobs.list(name=batch_job_name))
+
+            if jobs_list:
+                # Find exact match or match with [dev username] prefix
+                for j in jobs_list:
+                    if j.settings and j.settings.name:
+                        # Match exact name or name with dev prefix like "[dev q_yu] ai_parse_document_app_workflow"
+                        if (j.settings.name == batch_job_name or
+                            j.settings.name.endswith(batch_job_name)):
+                            job = j
+                            job_id_to_use = str(j.job_id)
+                            batch_job_id = job_id_to_use  # Cache for future requests
+                            print(f"✅ Found job: {j.settings.name} (ID: {j.job_id})")
+                            break
+
+        if job:
+            response = {
+                "success": True,
+                "job_deployed": True,
+                "job_id": job_id_to_use,
+                "job_name": job.settings.name if job.settings else None,
+                "input_volume_path": batch_input_volume_path,
+                "message": f"Batch job '{job.settings.name}' is ready"
+            }
+            print(f"🔵 DEBUG: Returning job found response: {response}")
+            return response
+        else:
+            # No job found
+            if not batch_job_name:
+                message = "No batch job configured. Please deploy the asset bundle and configure the job ID."
+            else:
+                message = f"Job '{batch_job_name}' not found. Please deploy the asset bundle first."
+
+            return {
+                "success": False,
+                "job_deployed": False,
+                "job_name": batch_job_name,
+                "input_volume_path": batch_input_volume_path,
+                "message": message
+            }
+    except Exception as e:
+        print(f"❌ Error in get_batch_job_config: {str(e)}")
+        return {
+            "success": False,
+            "job_deployed": False,
+            "job_name": batch_job_name,
+            "error": str(e),
+            "message": "Error checking job configuration"
+        }
+
+
+@app.post("/api/clean-batch-input-path")
+async def clean_batch_input_path():
+    """Clean all files from batch input volume path before new upload"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    if not batch_input_volume_path:
+        raise HTTPException(status_code=500, detail="BATCH_INPUT_VOLUME_PATH not configured")
+
+    try:
+        base_path = batch_input_volume_path.rstrip('/')
+
+        # Check if directory exists
+        try:
+            files_in_dir = w.files.list_directory_contents(base_path)
+
+            # Delete all files in the directory
+            deleted_count = 0
+            for file_info in files_in_dir:
+                try:
+                    w.files.delete(file_info.path)
+                    deleted_count += 1
+                    print(f"🗑️  Deleted: {file_info.path}")
+                except Exception as e:
+                    print(f"⚠️  Failed to delete {file_info.path}: {str(e)}")
+
+            return {
+                "success": True,
+                "message": f"Cleaned batch input path: {base_path}",
+                "deleted_count": deleted_count
+            }
+        except Exception as e:
+            # Directory doesn't exist or is already empty
+            if "does not exist" in str(e).lower() or "not found" in str(e).lower():
+                return {
+                    "success": True,
+                    "message": f"Batch input path is empty or doesn't exist: {base_path}",
+                    "deleted_count": 0
+                }
+            raise
+
+    except Exception as e:
+        print(f"❌ Error cleaning batch input path: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to clean batch input path: {str(e)}")
+
+
+@app.post("/api/upload-batch-pdfs")
+async def upload_batch_pdfs(files: List[UploadFile] = FastAPIFile(...)):
+    """Upload multiple PDF files to batch input volume"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    if not batch_input_volume_path:
+        raise HTTPException(status_code=500, detail="BATCH_INPUT_VOLUME_PATH not configured")
+
+    try:
+        uploaded_files = []
+        base_path = batch_input_volume_path.rstrip('/')
+
+        # Ensure input directory exists
+        try:
+            w.files.list_directory_contents(base_path)
+        except Exception:
+            # Directory doesn't exist, try to create it
+            print(f"📁 Creating batch input directory: {base_path}")
+            # Note: UC Volumes directories are created automatically on first file upload
+
+        for file in files:
+            if not file.filename.lower().endswith('.pdf'):
+                print(f"⚠️ Skipping non-PDF file: {file.filename}")
+                continue
+
+            # Read file content
+            content = await file.read()
+
+            # Construct full UC path
+            file_path = f"{base_path}/{file.filename}"
+
+            # Upload to UC Volume using Files API
+            w.files.upload(
+                file_path=file_path,
+                contents=io.BytesIO(content),
+                overwrite=True
+            )
+
+            uploaded_files.append({
+                "filename": file.filename,
+                "path": file_path,
+                "size": len(content)
+            })
+
+            print(f"✅ Uploaded batch PDF: {file_path}")
+
+        return {
+            "success": True,
+            "uploaded_files": uploaded_files,
+            "total_files": len(uploaded_files),
+            "volume_path": base_path
+        }
+
+    except Exception as e:
+        print(f"❌ Error uploading batch PDFs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload batch PDFs: {str(e)}")
+
+
+@app.post("/api/trigger-batch-job")
+def trigger_batch_job():
+    """Trigger the batch processing Databricks job"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    if not batch_job_id:
+        raise HTTPException(status_code=500, detail="BATCH_JOB_ID not configured")
+
+    try:
+        # Trigger the job
+        run = w.jobs.run_now(job_id=int(batch_job_id))
+
+        print(f"🚀 Triggered batch job {batch_job_id}, run_id: {run.run_id}")
+
+        return {
+            "success": True,
+            "run_id": run.run_id,
+            "job_id": batch_job_id,
+            "message": "Batch job triggered successfully"
+        }
+
+    except Exception as e:
+        print(f"❌ Error triggering batch job: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to trigger batch job: {str(e)}")
+
+
+@app.get("/api/batch-job-status/{run_id}")
+def get_batch_job_status(run_id: int):
+    """Get status of a batch job run"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    try:
+        # Get run details
+        run = w.jobs.get_run(run_id=run_id)
+
+        # Extract task statuses
+        tasks = []
+        if run.tasks:
+            for task in run.tasks:
+                tasks.append({
+                    "task_key": task.task_key,
+                    "state": task.state.life_cycle_state.value if task.state and task.state.life_cycle_state else "UNKNOWN",
+                    "result_state": task.state.result_state.value if task.state and task.state.result_state else None,
+                    "start_time": task.start_time,
+                    "end_time": task.end_time
+                })
+
+        # Overall run state
+        state = run.state
+        life_cycle_state = state.life_cycle_state.value if state and state.life_cycle_state else "UNKNOWN"
+        result_state = state.result_state.value if state and state.result_state else None
+
+        # Determine if job is still running
+        is_running = life_cycle_state in ["PENDING", "RUNNING", "TERMINATING"]
+        is_success = result_state == "SUCCESS"
+        is_failed = result_state in ["FAILED", "TIMEDOUT", "CANCELED"]
+
+        # Extract output table info from task parameters
+        output_tables = []
+        catalog = None
+        schema = None
+        raw_table = None
+        content_table = None
+
+        # Try to extract parameters from the first task (clean_pipeline_tables has all params)
+        if run.tasks and len(run.tasks) > 0:
+            job_id = run.job_id
+            if job_id:
+                try:
+                    job = w.jobs.get(job_id=job_id)
+
+                    # First, try job-level parameters (for backward compatibility)
+                    if job.settings and job.settings.parameters:
+                        params = job.settings.parameters
+                        catalog = params.get('catalog', '')
+                        schema = params.get('schema', '')
+                        raw_table = params.get('raw_table_name', '')
+                        content_table = params.get('content_table_name', '')
+
+                    # If not found, extract from task-level base_parameters
+                    if not catalog and job.settings and job.settings.tasks:
+                        for task_def in job.settings.tasks:
+                            # Look for the clean_pipeline_tables or parse_documents task which has all params
+                            if task_def.task_key in ['clean_pipeline_tables', 'parse_documents', 'extract_content']:
+                                if task_def.notebook_task and task_def.notebook_task.base_parameters:
+                                    params = task_def.notebook_task.base_parameters
+                                    if not catalog:
+                                        catalog = params.get('catalog', '')
+                                    if not schema:
+                                        schema = params.get('schema', '')
+                                    if not raw_table:
+                                        raw_table = params.get('raw_table_name') or params.get('table_name', '')
+                                    if not content_table:
+                                        content_table = params.get('content_table_name', '')
+
+                                    # If we found catalog and schema, we can build the table paths
+                                    if catalog and schema:
+                                        break
+
+                    # Build output table list
+                    if catalog and schema:
+                        if raw_table:
+                            output_tables.append(f"{catalog}.{schema}.{raw_table}")
+                        if content_table:
+                            output_tables.append(f"{catalog}.{schema}.{content_table}")
+
+                except Exception as e:
+                    print(f"⚠️ Could not fetch job parameters: {e}")
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "state": life_cycle_state,
+            "result_state": result_state,
+            "is_running": is_running,
+            "is_success": is_success,
+            "is_failed": is_failed,
+            "start_time": run.start_time,
+            "end_time": run.end_time,
+            "tasks": tasks,
+            "run_page_url": run.run_page_url,
+            "output_tables": output_tables
+        }
+
+    except Exception as e:
+        print(f"❌ Error getting batch job status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get batch job status: {str(e)}")
+
+
+@app.post("/api/batch-job-config")
+def update_batch_job_config(request: dict):
+    """Update batch job ID configuration"""
+    global batch_job_id
+
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    new_job_id = request.get("job_id")
+    if not new_job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    try:
+        # Verify job exists and is accessible
+        job = w.jobs.get(job_id=int(new_job_id))
+
+        # Update the global variable (persists for app lifetime)
+        batch_job_id = str(new_job_id)
+
+        # Update YAML config in memory
+        YAML_CONFIG["BATCH_JOB_ID"] = str(new_job_id)
+
+        print(f"✅ Updated BATCH_JOB_ID to {new_job_id} (in-memory)")
+
+        return {
+            "success": True,
+            "job_deployed": True,
+            "job_id": str(new_job_id),
+            "job_name": job.settings.name if job.settings else None,
+            "input_volume_path": batch_input_volume_path,
+            "message": f"Batch job ID updated to {new_job_id}"
+        }
+    except Exception as e:
+        print(f"❌ Failed to update batch job config: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update batch job config: {str(e)}")
+
+
+@app.get("/api/search-jobs")
+def search_jobs(name_filter: str = ""):
+    """Search for Databricks jobs by name"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection not configured")
+
+    try:
+        # List all jobs
+        jobs_list = w.jobs.list(expand_tasks=False, limit=100)
+
+        # Filter by name if provided
+        filtered_jobs = []
+        for job in jobs_list:
+            job_name = job.settings.name if job.settings and job.settings.name else ""
+            if not name_filter or name_filter.lower() in job_name.lower():
+                filtered_jobs.append({
+                    "job_id": str(job.job_id),
+                    "job_name": job_name,
+                    "created_time": job.created_time,
+                    "creator_user_name": job.creator_user_name
+                })
+
+        # Sort by created time (most recent first)
+        filtered_jobs.sort(key=lambda x: x.get("created_time", 0), reverse=True)
+
+        return {
+            "success": True,
+            "jobs": filtered_jobs[:20],  # Return top 20 results
+            "total_found": len(filtered_jobs)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to search jobs: {str(e)}")
+
+
 @app.post("/api/upload-to-uc")
 async def upload_to_uc(files: List[UploadFile] = FastAPIFile(...)):
     """Upload files to Databricks UC Volume"""
@@ -172,11 +569,28 @@ async def upload_to_uc(files: List[UploadFile] = FastAPIFile(...)):
     
     try:
         uploaded_files = []
-        
-        # Create "images" directory in UC Volume if it doesn't exist
+
         base_path = get_uc_volume_path().rstrip('/')  # Remove trailing slash
+
+        # Check if base volume path exists, create if it doesn't
+        try:
+            w.files.get_status(path=base_path)
+            print(f"✅ Base volume path exists: {base_path}")
+        except Exception:
+            # Base path doesn't exist, try to create it
+            try:
+                w.files.create_directory(directory_path=base_path)
+                print(f"✅ Created base volume path: {base_path}")
+            except Exception as create_error:
+                # Check if error is because directory already exists
+                if "already exists" in str(create_error).lower() or "file_already_exists" in str(create_error).lower():
+                    print(f"📁 Base volume path already exists: {base_path}")
+                else:
+                    print(f"⚠️ Warning: Could not create base volume path: {create_error}")
+
+        # Create "images" directory in UC Volume if it doesn't exist
         images_dir_path = f"{base_path}/images"
-        
+
         try:
             # Try to create the images directory
             w.files.create_directory(directory_path=images_dir_path)
@@ -271,28 +685,22 @@ async def upload_to_uc(files: List[UploadFile] = FastAPIFile(...)):
 
 @app.post("/api/write-to-delta-table")
 def write_to_delta_table(request: WriteToTableRequest):
-    """Write processed documents to delta table using ai_parse_document - replaces entire table"""
+    """Write processed documents to delta table using ai_parse_document - supports batch and append mode"""
     if not w:
         raise HTTPException(status_code=500, detail="Databricks connection is not configured.")
-    
+
     if not current_warehouse_id:
         raise HTTPException(status_code=500, detail="DATABRICKS_WAREHOUSE_ID is not set.")
 
     if not request.file_paths:
         raise HTTPException(status_code=400, detail="file_paths is required")
-    
-    # Validate we have exactly one file
-    if len(request.file_paths) != 1:
-        raise HTTPException(status_code=400, detail="Only one file can be processed at a time")
 
     try:
-        # Get the single file path
-        file_path = request.file_paths[0]
-        
         # Get the existing delta table path
         destination_table = get_delta_table_path()
         print(f"Working with delta table: {destination_table}")
-        print(f"Processing single file: {file_path}")
+        print(f"Processing {len(request.file_paths)} file(s) in {request.operation_mode} mode")
+        print(f"Files to process: {request.file_paths}")
         
         print("Checking table schema...")
         try:
@@ -367,50 +775,101 @@ def write_to_delta_table(request: WriteToTableRequest):
             else:
                 raise e
         
-        print("Table exists with correct schema, replacing all data...")
-        
-        # Convert to dbfs format for the path column
-        if file_path.startswith('/Volumes/'):
-            dbfs_path = 'dbfs:' + file_path
-        else:
-            dbfs_path = file_path
-        
-        print(f"DBFS path will be: {dbfs_path}")
+        print("Table exists with correct schema")
 
-        base_path = re.sub(r'/[^/]+$', '', file_path)  # Remove the file name at the end
+        # Handle deletion based on operation mode
+        if request.operation_mode == 'replace':
+            # TRUNCATE entire table - delete ALL existing records
+            truncate_query = f"""
+            DELETE FROM IDENTIFIER('{destination_table}')
+            """
+
+            print("Truncating entire table (replace mode)...")
+            truncate_result = w.statement_execution.execute_statement(
+                statement=truncate_query,
+                warehouse_id=current_warehouse_id,
+                wait_timeout='30s'
+            )
+
+            if truncate_result.status and truncate_result.status.state == StatementState.FAILED:
+                print(f"Truncate operation failed: {truncate_result.status}")
+            else:
+                print("Table truncated successfully")
+        elif request.operation_mode == 'append':
+            # In append mode, delete only the specific files being processed to avoid duplicates
+            for file_path in request.file_paths:
+                if file_path.startswith('/Volumes/'):
+                    dbfs_path = 'dbfs:' + file_path
+                else:
+                    dbfs_path = file_path
+
+                delete_query = f"""
+                DELETE FROM IDENTIFIER('{destination_table}')
+                WHERE path = '{dbfs_path}'
+                """
+
+                print(f"Deleting existing records for {dbfs_path} (append mode)...")
+                delete_result = w.statement_execution.execute_statement(
+                    statement=delete_query,
+                    warehouse_id=current_warehouse_id,
+                    wait_timeout='30s'
+                )
+
+                if delete_result.status and delete_result.status.state == StatementState.FAILED:
+                    print(f"Delete operation failed for {dbfs_path}: {delete_result.status}")
+                else:
+                    print(f"Existing records deleted successfully for {dbfs_path}")
         
-        # TRUNCATE entire table - delete ALL existing records
-        truncate_query = f"""
-        DELETE FROM IDENTIFIER('{destination_table}')
-        """
-        
-        print("Truncating entire table...")
-        truncate_result = w.statement_execution.execute_statement(
-            statement=truncate_query,
-            warehouse_id=current_warehouse_id,
-            wait_timeout='30s'
+        # Process all files in a SINGLE batch INSERT using ai_parse_document
+        # Convert all file paths to dbfs format
+        dbfs_paths = []
+        for file_path in request.file_paths:
+            if file_path.startswith('/Volumes/'):
+                dbfs_path = 'dbfs:' + file_path
+            else:
+                dbfs_path = file_path
+            dbfs_paths.append(dbfs_path)
+
+        print(f"Processing {len(dbfs_paths)} files in batch: {dbfs_paths}")
+
+        # Use the parent directory from the first file for image output
+        first_file_path = request.file_paths[0]
+        base_path = re.sub(r'/[^/]+$', '', first_file_path)  # Remove the file name at the end
+
+        # Check if all files are in the same directory
+        all_same_dir = all(
+            re.sub(r'/[^/]+$', '', path) == base_path
+            for path in request.file_paths
         )
-        
-        if truncate_result.status and truncate_result.status.state == StatementState.FAILED:
-            print(f"Truncate operation failed: {truncate_result.status}")
+
+        # Create a single INSERT query that processes ALL files in batch
+        if all_same_dir and len(request.file_paths) > 1:
+            # OPTIMIZATION: All files in same directory - use glob pattern
+            # This is much more efficient than UNION ALL for many files
+            dbfs_base_path = f"dbfs:{base_path}" if base_path.startswith('/Volumes/') else base_path
+            read_files_pattern = f"'{dbfs_base_path}/*.pdf'"
+            print(f"Using optimized glob pattern for batch processing: {read_files_pattern}")
+            file_cte = f"SELECT path, content FROM READ_FILES({read_files_pattern}, format => 'binaryFile')"
         else:
-            print("Table truncated successfully")
-        
-        # Then insert new records from the single file with deterministic table IDs
+            # Files in different directories - use UNION ALL
+            print("Using UNION ALL for files in different directories")
+            read_files_union = ' UNION ALL '.join([
+                f"SELECT path, content FROM READ_FILES('{dbfs_path}', format => 'binaryFile')"
+                for dbfs_path in dbfs_paths
+            ])
+            file_cte = read_files_union
+
         insert_query = f"""
         INSERT INTO IDENTIFIER('{destination_table}')
         WITH file AS (
-          SELECT 
-            path,
-            content
-          FROM READ_FILES('{dbfs_path}', format => 'binaryFile')
+          {file_cte}
         ),
         parsed as (
           SELECT
             path,
               ai_parse_document(
-                  content, 
-                  map('version', '2.0', 
+                  content,
+                  map('version', '2.0',
                       'imageOutputPath', '{base_path}/images',
                       'descriptionElementTypes', '*')
               ) as parsed
@@ -438,7 +897,7 @@ def write_to_delta_table(request: WriteToTableRequest):
             cast(items:type as string) as type,
             cast(items:bbox[0]:coord as ARRAY<DOUBLE>) as bbox,
             cast(items:bbox[0]:page_id as int) as page_id,
-            CASE 
+            CASE
               WHEN cast(items:type as string) = 'figure' THEN cast(items:description as string)
               ELSE cast(items:content as string)
             END as content,
@@ -461,67 +920,163 @@ def write_to_delta_table(request: WriteToTableRequest):
         inner join pages p
         on e.path = p.path and e.page_id = p.page_id
         """
-        
-        print(f"Executing INSERT for {file_path}")
-        
-        insert_result = w.statement_execution.execute_statement(
-            statement=insert_query,
-            warehouse_id=current_warehouse_id,
-            wait_timeout='50s'
-        )
-        
-        print(f"INSERT result: {insert_result.status}")
-        
-        # If the operation is still pending or running, wait for it to complete
-        if insert_result.status and insert_result.status.state in [StatementState.PENDING, StatementState.RUNNING]:
-            print("INSERT operation is pending, waiting for completion...")
-            try:
-                # Wait for the statement to complete
-                final_result = w.statement_execution.get_statement(insert_result.statement_id)
-                
-                # Keep checking until it's no longer pending or running (up to additional 30 seconds)
-                max_wait = 600
-                waited = 0
-                while final_result.status.state in [StatementState.PENDING, StatementState.RUNNING] and waited < max_wait:
-                    time.sleep(2)
-                    waited += 2
+
+        print(f"Executing BATCH INSERT for {len(request.file_paths)} files")
+
+        try:
+            insert_result = w.statement_execution.execute_statement(
+                statement=insert_query,
+                warehouse_id=current_warehouse_id,
+                wait_timeout='50s'  # Maximum allowed by Databricks (5s-50s range)
+            )
+
+            print(f"BATCH INSERT result: {insert_result.status}")
+
+            # If the operation is still pending or running, wait for it to complete
+            if insert_result.status and insert_result.status.state in [StatementState.PENDING, StatementState.RUNNING]:
+                print("BATCH INSERT operation is pending, waiting for completion...")
+                try:
+                    # Wait for the statement to complete
                     final_result = w.statement_execution.get_statement(insert_result.statement_id)
-                    print(f"Waiting for INSERT completion... ({waited}s) - Status: {final_result.status.state}")
-                
-                print(f"Final INSERT result: {final_result.status}")
-                insert_result = final_result
-                
-            except Exception as wait_error:
-                print(f"Error waiting for INSERT completion: {wait_error}")
-        
-        if insert_result.status and insert_result.status.state == StatementState.SUCCEEDED:
-            print(f"Successfully processed: {file_path} (read from: {dbfs_path})")
-            
-            return {
-                "success": True,
-                "destination_table": destination_table,
-                "processed_files": [file_path],
-                "message": "Successfully extracted tables from document and replaced entire table"
-            }
-        else:
-            error_msg = f"Failed to process {file_path}"
-            if insert_result.status and insert_result.status.error:
-                error_msg += f": {insert_result.status.error}"
+
+                    # Keep checking until it's no longer pending or running (up to 10 minutes for batch)
+                    max_wait = 600
+                    waited = 0
+                    while final_result.status.state in [StatementState.PENDING, StatementState.RUNNING] and waited < max_wait:
+                        time.sleep(5)
+                        waited += 5
+                        final_result = w.statement_execution.get_statement(insert_result.statement_id)
+                        print(f"Waiting for BATCH INSERT completion... ({waited}s) - Status: {final_result.status.state}")
+
+                    print(f"Final BATCH INSERT result: {final_result.status}")
+                    insert_result = final_result
+
+                except Exception as wait_error:
+                    print(f"Error waiting for BATCH INSERT completion: {wait_error}")
+
+            if insert_result.status and insert_result.status.state == StatementState.SUCCEEDED:
+                print(f"Successfully processed all {len(request.file_paths)} files in batch")
+                # Return all files as successful
+                return {
+                    "success": True,
+                    "destination_table": destination_table,
+                    "processed_files": request.file_paths,
+                    "failed_files": [],
+                    "total_processed": len(request.file_paths),
+                    "total_failed": 0,
+                    "operation_mode": request.operation_mode,
+                    "message": f"Successfully processed all {len(request.file_paths)} files in batch ({request.operation_mode} mode)"
+                }
+            else:
+                error_msg = "Batch processing failed"
+                if insert_result.status and insert_result.status.error:
+                    error_msg += f": {insert_result.status.error}"
+                print(error_msg)
+                # Return all files as failed
+                return {
+                    "success": False,
+                    "destination_table": destination_table,
+                    "processed_files": [],
+                    "failed_files": [{"file_path": fp, "error": error_msg} for fp in request.file_paths],
+                    "total_processed": 0,
+                    "total_failed": len(request.file_paths),
+                    "operation_mode": request.operation_mode,
+                    "message": error_msg
+                }
+
+        except Exception as batch_error:
+            error_msg = f"Error in batch processing: {str(batch_error)}"
             print(error_msg)
-            
+            # Return all files as failed
             return {
                 "success": False,
                 "destination_table": destination_table,
-                "processed_files": [file_path],
-                "processed_paths": [],
-                "data": [],
-                "total_results": 0,
+                "processed_files": [],
+                "failed_files": [{"file_path": fp, "error": error_msg} for fp in request.file_paths],
+                "total_processed": 0,
+                "total_failed": len(request.file_paths),
+                "operation_mode": request.operation_mode,
                 "message": error_msg
             }
 
     except Exception as e:
         print(f"Delta table write error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to write to delta table: {str(e)}")
+
+@app.get("/api/processed-files")
+def list_processed_files():
+    """Get list of all unique files in the delta table with metadata"""
+    if not w:
+        raise HTTPException(status_code=500, detail="Databricks connection is not configured.")
+
+    if not current_warehouse_id:
+        raise HTTPException(status_code=500, detail="DATABRICKS_WAREHOUSE_ID is not set.")
+
+    try:
+        destination_table = get_delta_table_path()
+        print(f"Listing processed files from delta table: {destination_table}")
+
+        query = f"""
+        SELECT
+            path,
+            COUNT(DISTINCT page_id) as total_pages,
+            COUNT(*) as total_elements,
+            MIN(element_id) as first_element_id,
+            MAX(element_id) as last_element_id
+        FROM IDENTIFIER('{destination_table}')
+        GROUP BY path
+        ORDER BY path
+        """
+
+        print(f"Executing processed files query: {query}")
+
+        result = w.statement_execution.execute_statement(
+            statement=query,
+            warehouse_id=current_warehouse_id,
+            wait_timeout='30s'
+        )
+
+        if result.result and result.result.data_array:
+            processed_files = []
+            for row in result.result.data_array:
+                path = row[0] if len(row) > 0 else ""
+                total_pages = int(row[1]) if len(row) > 1 and row[1] is not None else 0
+                total_elements = int(row[2]) if len(row) > 2 and row[2] is not None else 0
+
+                # Extract filename from path
+                filename = path.split('/')[-1] if path else "Unknown"
+
+                processed_files.append({
+                    "path": path,
+                    "filename": filename,
+                    "total_pages": total_pages,
+                    "total_elements": total_elements
+                })
+
+            print(f"Found {len(processed_files)} processed files")
+            return {
+                "success": True,
+                "processed_files": processed_files,
+                "total_files": len(processed_files),
+                "table_name": destination_table
+            }
+        else:
+            print("No processed files found")
+            return {
+                "success": True,
+                "processed_files": [],
+                "total_files": 0,
+                "message": "No processed files found in delta table"
+            }
+
+    except Exception as e:
+        print(f"Processed files query error: {e}")
+        return {
+            "success": False,
+            "processed_files": [],
+            "total_files": 0,
+            "error": f"Failed to list processed files: {str(e)}"
+        }
 
 @app.post("/api/query-delta-table")
 def query_delta_table(request: QueryDeltaTableRequest):

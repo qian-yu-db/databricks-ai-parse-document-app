@@ -1,18 +1,23 @@
-command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-
+command:
+- uvicorn
+- app:app
+- --host
+- 0.0.0.0
+- --port
+- '8000'
 env:
-- name: "DATABRICKS_APP_PORT"
-  value: "8000"
-- name: "DATABRICKS_WAREHOUSE_ID"
-  value: "862f1d757f0424f7"
-- name: "STATIC_FILES_PATH"
-  value: "/Workspace/Users/q.yu@databricks.com/databricks_apps/ai-parse-document-demo/static"
-# Frontend API Configuration (uncomment and update for production)
-- name: "NEXT_PUBLIC_API_URL"
-  value: "https://e2-demo-field-eng.cloud.databricks.com:8000"
-- name: "DATABRICKS_VOLUME_PATH"
-  value: "/Volumes/main/ai_parse_document_demo/ai-parse-document-demo/"
-- name: "DATABRICKS_DELTA_TABLE_PATH"
-  value: "main.ai_parse_document_demo.ai_parse_document_demo_documents"
-
-runtime: python_3.10 
+- name: DATABRICKS_APP_PORT
+  value: '8000'
+- name: DATABRICKS_WAREHOUSE_ID
+  value: 862f1d757f0424f7
+- name: STATIC_FILES_PATH
+  value: /Workspace/Users/q.yu@databricks.com/databricks_apps/ai-parse-job-enhanced/static
+- name: NEXT_PUBLIC_API_URL
+  value: https://e2-demo-field-eng.cloud.databricks.com:8000
+- name: DATABRICKS_VOLUME_PATH
+  value: /Volumes/main/ai_parse_document_demo/ai-parse-job-enhanced/
+- name: DATABRICKS_DELTA_TABLE_PATH
+  value: main.ai_parse_document_demo.ai_parse_job_enhanced_documents
+- name: BATCH_INPUT_VOLUME_PATH
+  value: /Volumes/main/ai_parse_document_demo/ai_parse_document_app_workflow/
+runtime: python_3.10

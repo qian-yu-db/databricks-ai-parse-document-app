@@ -4,9 +4,33 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useState, useRef, useEffect } from 'react';
 import Link from "next/link";
-import { ArrowLeft, Upload, FileText, Database, Settings, AlertCircle, File, Eye, Play, Loader2, Lightbulb, Save, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, Upload, FileText, Database, Settings, AlertCircle, File, Eye, Play, Loader2, Lightbulb, Save, ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { apiCall } from "@/lib/api-config";
 import { FloatingTooltip } from "@/components/ui/floating-tooltip";
+
+// Helper function to format state names for better UX
+const formatStateName = (state: string): string => {
+    const stateMap: Record<string, string> = {
+        'BLOCKED': 'PENDING',
+        'TERMINATED': 'COMPLETED',
+        'SUCCESS': 'SUCCESS',
+        'FAILED': 'FAILED',
+        'RUNNING': 'RUNNING',
+        'PENDING': 'PENDING',
+        'TERMINATING': 'FINISHING',
+        'CANCELED': 'CANCELED'
+    };
+    return stateMap[state] || state;
+};
+
+// Helper function to calculate duration in seconds
+const calculateDuration = (startTime: number | null, endTime: number | null): string => {
+    if (!startTime) return '';
+    if (!endTime) return '...';
+    const durationMs = endTime - startTime;
+    const durationSec = Math.round(durationMs / 1000);
+    return `${durationSec}s`;
+};
 
 interface SelectedFile {
     file: File;
@@ -37,11 +61,30 @@ interface DeltaTablePathConfig {
 }
 
 export default function DocumentIntelligencePage() {
+    // Mode selection: 'interactive' or 'batch'
+    const [processingMode, setProcessingMode] = useState<'interactive' | 'batch' | null>(null);
+
+    // Batch mode state
+    const [batchJobConfig, setBatchJobConfig] = useState<any>(null);
+    const [batchJobConfigLoading, setBatchJobConfigLoading] = useState(false);
+    const [batchFiles, setBatchFiles] = useState<File[]>([]);
+    const [batchUploadProgress, setBatchUploadProgress] = useState<{uploading: boolean, total: number, uploaded: number}>({uploading: false, total: 0, uploaded: 0});
+    const [batchJobRunId, setBatchJobRunId] = useState<number | null>(null);
+    const [batchJobStatus, setBatchJobStatus] = useState<any>(null);
+    const [batchJobPolling, setBatchJobPolling] = useState(false);
+    const batchFileInputRef = useRef<HTMLInputElement>(null);
+
+    // Batch job configuration state
+    const [showBatchJobConfig, setShowBatchJobConfig] = useState(false);
+    const [newBatchJobId, setNewBatchJobId] = useState('');
+    const [batchJobUpdateLoading, setBatchJobUpdateLoading] = useState(false);
+    const [batchJobUpdateSuccess, setBatchJobUpdateSuccess] = useState(false);
+
     const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([]);
     const [activeFileIndex, setActiveFileIndex] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    
+
     // Demo Value and Settings state
     const [showValueModal, setShowValueModal] = useState(false);
     const [showWarehouseConfig, setShowWarehouseConfig] = useState(false);
@@ -1150,8 +1193,206 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
 
     const activeFile = activeFileIndex !== null ? selectedFiles[activeFileIndex] : null;
 
+    // ========== Batch Mode Functions ==========
+
+    // Function to check batch job configuration
+    const checkBatchConfig = async () => {
+        setBatchJobConfigLoading(true);
+        try {
+            // Add timestamp to prevent caching
+            const timestamp = new Date().getTime();
+            const data = await apiCall(`/api/batch-job-config?t=${timestamp}`, {
+                method: 'GET',
+                cache: 'no-store',
+            });
+            setBatchJobConfig(data);
+        } catch (error) {
+            console.error('Error loading batch job config:', error);
+            setBatchJobConfig(null);
+        } finally {
+            setBatchJobConfigLoading(false);
+        }
+    };
+
+    // Check batch job configuration on mount
+    useEffect(() => {
+        checkBatchConfig();
+    }, []);
+
+    const handleBatchFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files.length > 0) {
+            const filesArray = Array.from(e.target.files);
+            setBatchFiles(filesArray);
+        }
+    };
+
+    const uploadAndTriggerBatchJob = async () => {
+        if (batchFiles.length === 0) return;
+
+        setBatchUploadProgress({ uploading: true, total: batchFiles.length, uploaded: 0 });
+
+        try {
+            // Step 1: Clean the batch input path before uploading
+            console.log('Cleaning batch input path...');
+            const cleanResult = await apiCall("/api/clean-batch-input-path", {
+                method: 'POST',
+            });
+            console.log(`Cleaned ${cleanResult.deleted_count} existing files from batch input path`);
+
+            // Step 2: Upload files
+            const formData = new FormData();
+            batchFiles.forEach((file) => {
+                formData.append('files', file);
+            });
+
+            await apiCall("/api/upload-batch-pdfs", {
+                method: 'POST',
+                body: formData,
+            });
+
+            setBatchUploadProgress({ uploading: false, total: batchFiles.length, uploaded: batchFiles.length });
+
+            // Trigger job
+            const triggerResult = await apiCall("/api/trigger-batch-job", {
+                method: 'POST',
+            });
+
+            const { run_id } = triggerResult;
+            setBatchJobRunId(run_id);
+            setBatchJobPolling(true);
+
+            // Start polling for job status
+            pollBatchJobStatus(run_id);
+        } catch (error) {
+            console.error('Error in batch processing:', error);
+            const errorMsg = getErrorMessage(error);
+            alert(`Failed to process batch job: ${errorMsg}`);
+            setBatchUploadProgress({ uploading: false, total: 0, uploaded: 0 });
+        }
+    };
+
+    const pollBatchJobStatus = async (runId: number) => {
+        const pollInterval = setInterval(async () => {
+            try {
+                const status = await apiCall(`/api/batch-job-status/${runId}`, {
+                    method: 'GET',
+                });
+                setBatchJobStatus(status);
+
+                // Stop polling if terminal state (use flat structure)
+                if (['SUCCESS', 'FAILED', 'CANCELED', 'TERMINATED'].includes(status.state)) {
+                    clearInterval(pollInterval);
+                    setBatchJobPolling(false);
+                }
+            } catch (error) {
+                console.error('Error polling job status:', error);
+            }
+        }, 5000); // Poll every 5 seconds
+    };
+
+    const updateBatchJobId = async () => {
+        if (!newBatchJobId.trim()) {
+            alert('Please enter a job ID');
+            return;
+        }
+
+        setBatchJobUpdateLoading(true);
+        setBatchJobUpdateSuccess(false);
+
+        try {
+            const data = await apiCall("/api/batch-job-config", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ job_id: newBatchJobId.trim() }),
+            });
+
+            // Update the batch job config with complete data from response
+            setBatchJobConfig({
+                ...batchJobConfig,
+                success: data.success,
+                job_deployed: data.job_deployed,
+                job_id: data.job_id,
+                job_name: data.job_name,
+                input_volume_path: data.input_volume_path,
+            });
+            setBatchJobUpdateSuccess(true);
+            setNewBatchJobId('');
+
+            // Hide success message after 3 seconds
+            setTimeout(() => setBatchJobUpdateSuccess(false), 3000);
+        } catch (error) {
+            console.error('Error updating batch job ID:', error);
+            const errorMsg = getErrorMessage(error);
+            alert(`Failed to update job ID: ${errorMsg}`);
+        } finally {
+            setBatchJobUpdateLoading(false);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-50">
+            {/* Mode Selector - Show if no mode selected */}
+            {processingMode === null && (
+                <div className="min-h-screen flex items-center justify-center p-8">
+                    <div className="max-w-4xl w-full">
+                        <div className="text-center mb-8">
+                            <h1 className="text-4xl font-bold text-gray-800 mb-2">Document Intelligence</h1>
+                            <p className="text-gray-600">Choose your processing mode</p>
+                        </div>
+                        <div className="grid md:grid-cols-2 gap-6">
+                            {/* Interactive Mode Card */}
+                            <div
+                                onClick={() => setProcessingMode('interactive')}
+                                className="bg-white rounded-lg shadow-md p-8 cursor-pointer hover:shadow-xl transition-shadow border-2 border-transparent hover:border-blue-500"
+                            >
+                                <div className="text-center">
+                                    <div className="bg-blue-100 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
+                                        <FileText className="w-8 h-8 text-blue-600" />
+                                    </div>
+                                    <h2 className="text-2xl font-bold text-gray-800 mb-3">Interactive Mode</h2>
+                                    <p className="text-gray-600 mb-4">
+                                        Process and visualize a single PDF document with interactive bounding box visualization
+                                    </p>
+                                    <ul className="text-sm text-gray-500 space-y-2 text-left">
+                                        <li>✓ Upload one PDF at a time</li>
+                                        <li>✓ Interactive page visualization</li>
+                                        <li>✓ Immediate results</li>
+                                        <li>✓ Ideal for debugging complex document parsing</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            {/* Batch Mode Card */}
+                            <div
+                                onClick={() => setProcessingMode('batch')}
+                                className="bg-white rounded-lg shadow-md p-8 cursor-pointer hover:shadow-xl transition-shadow border-2 border-transparent hover:border-green-500"
+                            >
+                                <div className="text-center">
+                                    <div className="bg-green-100 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
+                                        <Upload className="w-8 h-8 text-green-600" />
+                                    </div>
+                                    <h2 className="text-2xl font-bold text-gray-800 mb-3">Batch Mode</h2>
+                                    <p className="text-gray-600 mb-4">
+                                        Process multiple PDF documents using Databricks Jobs for high-volume workflows
+                                    </p>
+                                    <ul className="text-sm text-gray-500 space-y-2 text-left">
+                                        <li>✓ Upload multiple PDFs</li>
+                                        <li>✓ Structured streaming processing</li>
+                                        <li>✓ Scalable job execution</li>
+                                        <li>✓ Batch results in Delta tables</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Interactive Mode - Original Main Branch Implementation */}
+            {processingMode === 'interactive' && (
+                <>
             {/* Value Proposition Modal */}
             {showValueModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 animate-in fade-in duration-300">
@@ -1271,10 +1512,13 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
             {/* Header */}
             <header className="bg-white shadow-sm border-b border-gray-200">
                 <div className="flex items-center justify-between px-8 py-4">
-                    <Link href="/" className="flex items-center text-blue-600 hover:text-blue-800 font-medium">
+                    <button
+                        onClick={() => setProcessingMode(null)}
+                        className="flex items-center text-blue-600 hover:text-blue-800 font-medium"
+                    >
                         <ArrowLeft className="w-4 h-4 mr-2" />
-                        back to main menu
-                    </Link>
+                        back to mode selection
+                    </button>
                     <div className="flex items-center space-x-4">
                         <button 
                             onClick={() => setShowWarehouseConfig(!showWarehouseConfig)}
@@ -1510,7 +1754,7 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                             <CardTitle className="flex items-center justify-between">
                                 <div className="flex items-center">
                                     <Upload className="mr-2 h-4 w-4" />
-                                    Select Documents
+                                    Select Document
                                 </div>
                                 <Button
                                     variant="ghost"
@@ -1523,7 +1767,7 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                             </CardTitle>
                             {!isFileUploadCollapsed && (
                                 <CardDescription className="text-sm">
-                                    Select files from your local system to preview and process with AI
+                                    Select a single PDF document for interactive processing and visualization
                                 </CardDescription>
                             )}
                         </CardHeader>
@@ -1532,15 +1776,17 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                 <input
                                     ref={fileInputRef}
                                     type="file"
-                                    multiple
                                     onChange={handleFileChange}
                                     className="hidden"
-                                    accept=".txt,.pdf,.doc,.docx,.csv,.json,.jpg,.jpeg,.png"
+                                    accept=".pdf"
                                 />
                                 <Button onClick={handleFileSelect} className="w-full text-sm">
                                     <Upload className="mr-2 h-4 w-4" />
-                                    Select Files to Upload
+                                    Select PDF File
                                 </Button>
+                                <p className="text-xs text-gray-500 mt-2 text-center">
+                                    Only one PDF at a time. For batch processing, use Batch Mode.
+                                </p>
                             </CardContent>
                         )}
                     </Card>
@@ -1552,7 +1798,7 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                 <CardTitle className="flex items-center justify-between">
                                     <div className="flex items-center">
                                         <Database className="mr-2 h-4 w-4" />
-                                        Selected Files ({selectedFiles.length})
+                                        Selected File
                                     </div>
                                     <Button
                                         variant="ghost"
@@ -1565,7 +1811,7 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                 </CardTitle>
                                 {!isSelectedFilesCollapsed && (
                                     <CardDescription className="text-sm">
-                                        Click to preview a file, then use Upload to upload to UC Volume
+                                        Click to preview the file, then use Upload to upload to UC Volume
                                     </CardDescription>
                                 )}
                             </CardHeader>
@@ -2102,6 +2348,262 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
 
                 </div>
             </main>
+                </>
+            )}
+
+            {/* Batch Mode UI */}
+            {processingMode === 'batch' && (
+                <div className="min-h-screen">
+                    {/* Header */}
+                    <header className="bg-white shadow-sm border-b border-gray-200">
+                        <div className="flex items-center justify-between px-8 py-4">
+                            <button
+                                onClick={() => setProcessingMode(null)}
+                                className="flex items-center text-blue-600 hover:text-blue-800 font-medium"
+                            >
+                                <ArrowLeft className="w-4 h-4 mr-2" />
+                                back to mode selection
+                            </button>
+                            <h1 className="text-xl font-semibold text-gray-800">Batch Processing Mode</h1>
+                        </div>
+                    </header>
+
+                    {/* Main Content */}
+                    <main className="max-w-6xl mx-auto p-8">
+                        <Card>
+                            <CardHeader>
+                                <CardTitle>Batch PDF Processing</CardTitle>
+                                <CardDescription>
+                                    Upload multiple PDFs and trigger asynchronous processing using Databricks Jobs
+                                </CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-6">
+                                {/* Job Configuration Status */}
+                                <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <h3 className="font-semibold">Job Configuration</h3>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={checkBatchConfig}
+                                                disabled={batchJobConfigLoading}
+                                                className="text-xs text-gray-600 hover:text-gray-800 font-medium flex items-center gap-1"
+                                                title="Refresh configuration from backend"
+                                            >
+                                                <RefreshCw className={`w-3 h-3 ${batchJobConfigLoading ? 'animate-spin' : ''}`} />
+                                                Refresh
+                                            </button>
+                                            <button
+                                                onClick={() => setShowBatchJobConfig(!showBatchJobConfig)}
+                                                className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                            >
+                                                {showBatchJobConfig ? 'Hide Settings' : 'Update Job ID'}
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {batchJobConfigLoading ? (
+                                        <p className="text-sm text-gray-600">Loading job configuration...</p>
+                                    ) : batchJobConfig?.job_deployed ? (
+                                        <div className="text-sm space-y-1">
+                                            <p className="text-green-600 font-medium">✓ Batch job is configured and deployed</p>
+                                            <p className="text-gray-600">Job ID: {batchJobConfig.job_id}</p>
+                                            <p className="text-gray-600">Job Name: {batchJobConfig.job_name}</p>
+                                            <p className="text-gray-600">Input Volume: {batchJobConfig.input_volume_path}</p>
+                                        </div>
+                                    ) : (
+                                        <div className="text-sm space-y-2">
+                                            <p className="text-red-600">⚠ Batch job is not configured or not deployed</p>
+                                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-gray-700">
+                                                <p className="font-semibold text-blue-900 mb-2">To deploy the Asset Bundle:</p>
+                                                <p className="text-gray-600 mb-2 italic">Note: The asset bundle is included in the project repository. Ensure you have cloned the repo before proceeding.</p>
+                                                <ol className="list-decimal list-inside space-y-1 ml-2">
+                                                    <li>Navigate to the <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">unstructured_workflow</code> directory</li>
+                                                    <li>Run: <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">databricks bundle validate --profile YOUR_PROFILE</code></li>
+                                                    <li>Deploy: <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">databricks bundle deploy --profile YOUR_PROFILE</code></li>
+                                                    <li>The app will automatically detect the deployed job by name</li>
+                                                    <li>If needed, you can manually enter the Job ID using "Update Job ID" button above</li>
+                                                </ol>
+                                                <p className="mt-2 text-blue-800">
+                                                    See <code className="bg-white px-1 py-0.5 rounded font-mono text-xs">unstructured_workflow/CLAUDE.md</code> for detailed instructions.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Job ID Update Section */}
+                                    {showBatchJobConfig && (
+                                        <div className="mt-4 pt-4 border-t border-gray-200">
+                                            <h4 className="text-sm font-medium text-gray-700 mb-2">Update Batch Job ID</h4>
+                                            <p className="text-xs text-gray-500 mb-3">
+                                                Enter the Databricks Job ID for batch processing. You can find this in your Databricks workspace under Workflows → Jobs.
+                                            </p>
+                                            <div className="flex items-center space-x-2">
+                                                <input
+                                                    type="text"
+                                                    value={newBatchJobId}
+                                                    onChange={(e) => setNewBatchJobId(e.target.value)}
+                                                    placeholder="Enter Job ID (e.g., 538604830129533)"
+                                                    className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                                />
+                                                <Button
+                                                    onClick={updateBatchJobId}
+                                                    disabled={batchJobUpdateLoading || !newBatchJobId.trim()}
+                                                    size="sm"
+                                                    className="flex items-center"
+                                                >
+                                                    {batchJobUpdateLoading ? (
+                                                        "Saving..."
+                                                    ) : (
+                                                        <>
+                                                            <Save className="w-4 h-4 mr-1" />
+                                                            Save
+                                                        </>
+                                                    )}
+                                                </Button>
+                                            </div>
+
+                                            {batchJobUpdateSuccess && (
+                                                <div className="flex items-center text-green-600 text-sm mt-2">
+                                                    <AlertCircle className="w-4 h-4 mr-2" />
+                                                    Job ID updated successfully! The new job will be used for batch processing.
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* File Upload Section */}
+                                {batchJobConfig && (
+                                    <>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                Select PDF Files
+                                            </label>
+                                            <input
+                                                ref={batchFileInputRef}
+                                                type="file"
+                                                accept=".pdf"
+                                                multiple
+                                                onChange={handleBatchFileSelect}
+                                                className="block w-full text-sm text-gray-500
+                                                    file:mr-4 file:py-2 file:px-4
+                                                    file:rounded-md file:border-0
+                                                    file:text-sm file:font-semibold
+                                                    file:bg-blue-50 file:text-blue-700
+                                                    hover:file:bg-blue-100
+                                                    cursor-pointer"
+                                            />
+                                            {batchFiles.length > 0 && (
+                                                <p className="mt-2 text-sm text-gray-600">
+                                                    {batchFiles.length} file(s) selected
+                                                </p>
+                                            )}
+                                        </div>
+
+                                        {/* Upload Progress */}
+                                        {batchUploadProgress.uploading && (
+                                            <div className="bg-blue-50 p-4 rounded-lg">
+                                                <p className="text-sm font-medium text-blue-700 mb-1">
+                                                    Uploading files... {batchUploadProgress.uploaded} / {batchUploadProgress.total}
+                                                </p>
+                                                {batchJobConfig?.input_volume_path && (
+                                                    <p className="text-xs text-blue-600 font-mono">
+                                                        Uploading to: {batchJobConfig.input_volume_path}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Upload and Trigger Button */}
+                                        <button
+                                            onClick={uploadAndTriggerBatchJob}
+                                            disabled={batchFiles.length === 0 || batchUploadProgress.uploading || batchJobPolling}
+                                            className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                        >
+                                            {batchUploadProgress.uploading ? 'Uploading...' : batchJobPolling ? 'Job Running...' : 'Upload and Start Batch Processing'}
+                                        </button>
+
+                                        {/* Job Status */}
+                                        {batchJobRunId && batchJobStatus && (
+                                            <div className="bg-gray-50 p-4 rounded-lg">
+                                                <h3 className="font-semibold mb-2">Job Status</h3>
+                                                <div className="text-sm space-y-1">
+                                                    <p>Run ID: {batchJobRunId}</p>
+                                                    <p>State: <span className={`font-medium ${
+                                                        batchJobStatus.state === 'SUCCESS' ? 'text-green-600' :
+                                                        batchJobStatus.state === 'FAILED' ? 'text-red-600' :
+                                                        'text-blue-600'
+                                                    }`}>{batchJobStatus.state || 'N/A'}</span></p>
+                                                    <p>Result State: {batchJobStatus.result_state || 'N/A'}</p>
+                                                    {batchJobStatus.run_page_url && (
+                                                        <a
+                                                            href={batchJobStatus.run_page_url}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-blue-600 hover:underline"
+                                                        >
+                                                            View in Databricks →
+                                                        </a>
+                                                    )}
+                                                    {batchJobStatus.tasks && batchJobStatus.tasks.length > 0 && (
+                                                        <div className="mt-3">
+                                                            <p className="font-medium mb-1">Tasks:</p>
+                                                            <ul className="space-y-1 ml-4">
+                                                                {(() => {
+                                                                    // Sort tasks in workflow execution order
+                                                                    const taskOrder = ['clean_pipeline_tables', 'parse_documents', 'extract_content'];
+                                                                    const sortedTasks = [...batchJobStatus.tasks].sort((a, b) => {
+                                                                        const indexA = taskOrder.indexOf(a.task_key);
+                                                                        const indexB = taskOrder.indexOf(b.task_key);
+                                                                        // If task not in order array, put it at the end
+                                                                        const orderA = indexA === -1 ? 999 : indexA;
+                                                                        const orderB = indexB === -1 ? 999 : indexB;
+                                                                        return orderA - orderB;
+                                                                    });
+
+                                                                    return sortedTasks.map((task: any, idx: number) => {
+                                                                        const formattedState = formatStateName(task.state || 'N/A');
+                                                                        const duration = calculateDuration(task.start_time, task.end_time);
+                                                                        return (
+                                                                            <li key={idx} className="text-sm">
+                                                                                {task.task_key}: <span className={`font-medium ${
+                                                                                    task.state === 'SUCCESS' || task.state === 'TERMINATED' ? 'text-green-600' :
+                                                                                    task.state === 'FAILED' ? 'text-red-600' :
+                                                                                    'text-blue-600'
+                                                                                }`}>{formattedState}</span>
+                                                                                {duration && <span className="text-gray-500 ml-2">({duration})</span>}
+                                                                            </li>
+                                                                        );
+                                                                    });
+                                                                })()}
+                                                            </ul>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Output Tables Display */}
+                                                    {batchJobStatus.output_tables && batchJobStatus.output_tables.length > 0 && (
+                                                        <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                                                            <p className="font-medium mb-1 text-blue-900">📊 Output Tables</p>
+                                                            <p className="text-xs text-blue-700 mb-2">Extracted document content is stored in:</p>
+                                                            <ul className="space-y-1 ml-2">
+                                                                {batchJobStatus.output_tables.map((table: string, idx: number) => (
+                                                                    <li key={idx} className="text-sm font-mono text-blue-800 bg-white px-2 py-1 rounded border border-blue-200">
+                                                                        {table}
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </CardContent>
+                        </Card>
+                    </main>
+                </div>
+            )}
         </div>
     );
 } 
