@@ -2,6 +2,42 @@
 
 A full-stack Databricks application that demonstrates the power of AI Functions for document intelligence, featuring dual processing modes (Interactive and Batch), automated document parsing, structured data extraction, and interactive visualization of detected elements.
 
+---
+
+## 📸 Application Interface
+
+<div align="center">
+
+### 🎯 Mode Selection
+Choose between Interactive mode for single-file processing or Batch mode for high-volume workflows
+
+<img src="./images/dual_mode.png" alt="Dual Mode Selection Interface" width="800"/>
+
+---
+
+### 📄 Interactive Mode - Upload & Configuration
+Single-file upload interface 
+
+<img src="./images/interactive_mode.png" alt="Interactive Mode Upload and Configuration" width="800"/>
+
+---
+
+### 🔍 Interactive Mode - Document Visualization
+Document processing review with color-coded bounding boxes highlighting extracted elements (text, tables, headers, figures)
+
+<img src="./images/bbox_visual.png" alt="Interactive Mode with Bounding Box Visualization" width="800"/>
+
+---
+
+### 📊 Batch Mode - Job Monitoring
+Multi-file processing with live job status tracking, task progress, and output table locations
+
+<img src="./images/batch_job.png" alt="Batch Mode Job Status Monitoring" width="800"/>
+
+</div>
+
+---
+
 ## 🌟 Key Features
 
 ### Dual Processing Modes
@@ -121,7 +157,30 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8000
 
 ### Deployment to Databricks Apps
 
-#### 1. Deploy the Databricks App
+#### 1. Set Up a Databricks App with UI
+
+**Step 1**: Create an empty app with the Databricks app
+
+![create databricks app step1](./images/databricks-app-creation-step1.png)
+
+**Step 2**: Config the app name and resources
+
+![create databricks app step2](./images/databricks-app-creation-step2.png)
+
+
+![create databricks app step3](./images/databricks-app-creation-step3.png)
+
+For running `ai_parse_document()`, add a SQL Warehouse Resource
+
+**Step 3**: Grant the app service principle the right permission
+
+e.g. Unity Catalog Schema, Volumes
+
+![create databricks app step4](./images/databricks-app-creation-step4.png)
+
+**Note**: One can also use `databricks app create my-app-name` CLI command for app creation
+
+#### 2. Deploy the Databricks App
 
 ```bash
 # Deploy with default settings
@@ -137,7 +196,7 @@ The deployment script will:
 3. Package and deploy the backend
 4. Configure the Databricks App
 
-#### 2. Deploy the Batch Workflow (Optional - for Batch Mode)
+#### 3. Deploy the Batch Workflow 
 
 ```bash
 cd unstructured_workflow
@@ -287,10 +346,6 @@ ai_parse_document_databricks_app/
 6. Sort data numerically (not as strings) where appropriate
 7. Update both CLAUDE.md files when changing architecture
 
-## 📄 License
-
-This project is part of Databricks' AI Functions demonstration and is intended for educational and demonstration purposes.
-
 ## 🆘 Support
 
 For issues or questions:
@@ -301,4 +356,4 @@ For issues or questions:
 
 ---
 
-**Built with ❤️ using Databricks AI Functions**
+**Built with ❤️ using Databricks AI Functions and Databricks App**
