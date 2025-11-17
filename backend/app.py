@@ -506,6 +506,49 @@ def update_batch_job_config(request: dict):
         # Verify job exists and is accessible
         job = w.jobs.get(job_id=int(new_job_id))
 
+        # Validate job structure matches expected Asset Bundle workflow
+        warnings = []
+        is_compatible = True
+        expected_task_keys = ['clean_pipeline_tables', 'parse_documents', 'extract_content']
+
+        if job.settings and job.settings.tasks:
+            actual_task_keys = [task.task_key for task in job.settings.tasks]
+
+            # Check if job has the expected task structure
+            matching_tasks = [task for task in expected_task_keys if task in actual_task_keys]
+
+            if len(matching_tasks) == 0:
+                # No matching tasks at all
+                is_compatible = False
+                warnings.append(
+                    f"⚠️ Job structure mismatch: This job has tasks {actual_task_keys} but the app expects "
+                    f"{expected_task_keys}. Output tables and batch processing may not work correctly."
+                )
+            elif len(matching_tasks) < len(expected_task_keys):
+                # Some tasks are missing
+                missing_tasks = [task for task in expected_task_keys if task not in actual_task_keys]
+                warnings.append(
+                    f"⚠️ Partial compatibility: Job is missing expected tasks: {missing_tasks}. "
+                    f"Some features may not work as intended."
+                )
+
+            # Check if tasks have expected parameters
+            if matching_tasks:
+                for task_def in job.settings.tasks:
+                    if task_def.task_key in expected_task_keys:
+                        if task_def.notebook_task and task_def.notebook_task.base_parameters:
+                            params = task_def.notebook_task.base_parameters
+                            required_params = ['catalog', 'schema']
+                            missing_params = [p for p in required_params if p not in params]
+                            if missing_params:
+                                warnings.append(
+                                    f"⚠️ Task '{task_def.task_key}' is missing required parameters: {missing_params}"
+                                )
+                                break
+        else:
+            is_compatible = False
+            warnings.append("⚠️ Job has no tasks defined. This job cannot be used for batch processing.")
+
         # Update the global variable (persists for app lifetime)
         batch_job_id = str(new_job_id)
 
@@ -513,6 +556,8 @@ def update_batch_job_config(request: dict):
         YAML_CONFIG["BATCH_JOB_ID"] = str(new_job_id)
 
         print(f"✅ Updated BATCH_JOB_ID to {new_job_id} (in-memory)")
+        if warnings:
+            print(f"⚠️ Job validation warnings: {warnings}")
 
         return {
             "success": True,
@@ -520,7 +565,9 @@ def update_batch_job_config(request: dict):
             "job_id": str(new_job_id),
             "job_name": job.settings.name if job.settings else None,
             "input_volume_path": batch_input_volume_path,
-            "message": f"Batch job ID updated to {new_job_id}"
+            "is_compatible": is_compatible,
+            "warnings": warnings,
+            "message": f"Batch job ID updated to {new_job_id}" + (" (with warnings)" if warnings else "")
         }
     except Exception as e:
         print(f"❌ Failed to update batch job config: {str(e)}")

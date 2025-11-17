@@ -1316,6 +1316,8 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                 job_id: data.job_id,
                 job_name: data.job_name,
                 input_volume_path: data.input_volume_path,
+                is_compatible: data.is_compatible,
+                warnings: data.warnings || [],
             });
             setBatchJobUpdateSuccess(true);
             setNewBatchJobId('');
@@ -2404,11 +2406,54 @@ Click the "Process" button to upload this file to UC Volume and extract its cont
                                     {batchJobConfigLoading ? (
                                         <p className="text-sm text-gray-600">Loading job configuration...</p>
                                     ) : batchJobConfig?.job_deployed ? (
-                                        <div className="text-sm space-y-1">
-                                            <p className="text-green-600 font-medium">✓ Batch job is configured and deployed</p>
-                                            <p className="text-gray-600">Job ID: {batchJobConfig.job_id}</p>
-                                            <p className="text-gray-600">Job Name: {batchJobConfig.job_name}</p>
-                                            <p className="text-gray-600">Input Volume: {batchJobConfig.input_volume_path}</p>
+                                        <div className="text-sm space-y-2">
+                                            <div className="space-y-1">
+                                                <p className="text-green-600 font-medium">✓ Batch job is configured and deployed</p>
+                                                <p className="text-gray-600">Job ID: {batchJobConfig.job_id}</p>
+                                                <p className="text-gray-600">Job Name: {batchJobConfig.job_name}</p>
+                                                <p className="text-gray-600">Input Volume: {batchJobConfig.input_volume_path}</p>
+                                            </div>
+
+                                            {/* Job Compatibility Warnings */}
+                                            {batchJobConfig.warnings && batchJobConfig.warnings.length > 0 && (
+                                                <div className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded-r">
+                                                    <div className="flex items-start">
+                                                        <AlertCircle className="w-5 h-5 text-yellow-600 mr-2 flex-shrink-0 mt-0.5" />
+                                                        <div className="flex-1">
+                                                            <p className="text-sm font-semibold text-yellow-800 mb-1">
+                                                                ⚠️ Job Compatibility Warning
+                                                            </p>
+                                                            <p className="text-xs text-yellow-700 mb-2">
+                                                                This job does not match the expected Asset Bundle workflow structure. Some features may not work correctly:
+                                                            </p>
+                                                            <ul className="list-disc list-inside space-y-1 text-xs text-yellow-800 ml-2">
+                                                                {batchJobConfig.warnings.map((warning: string, idx: number) => (
+                                                                    <li key={idx}>{warning}</li>
+                                                                ))}
+                                                            </ul>
+                                                            <div className="mt-2 pt-2 border-t border-yellow-200">
+                                                                <p className="text-xs text-yellow-800 font-medium">Expected workflow structure:</p>
+                                                                <ul className="list-disc list-inside text-xs text-yellow-700 ml-2 mt-1">
+                                                                    <li>Tasks: clean_pipeline_tables, parse_documents, extract_content</li>
+                                                                    <li>Parameters: catalog, schema, raw_table_name, content_table_name</li>
+                                                                </ul>
+                                                                <p className="text-xs text-yellow-700 mt-2">
+                                                                    💡 To use the full functionality, deploy the Asset Bundle from <code className="bg-yellow-100 px-1 rounded">unstructured_workflow/</code> directory.
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Compatibility Success Message */}
+                                            {batchJobConfig.is_compatible === true && (!batchJobConfig.warnings || batchJobConfig.warnings.length === 0) && (
+                                                <div className="bg-green-50 border-l-4 border-green-400 p-2 rounded-r">
+                                                    <p className="text-xs text-green-700">
+                                                        ✓ Job structure is compatible with the Asset Bundle workflow
+                                                    </p>
+                                                </div>
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="text-sm space-y-2">
